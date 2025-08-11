@@ -1,1 +1,23 @@
 .idea/
+# Model checkpoints and data
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+logs/
+# LJSpeech dataset audio files
+resources/filelists/ljspeech/metadata_test.txt
+resources/filelists/ljspeech/metadata_train.txt
+resources/filelists/ljspeech/metadata_val.txt
+
+
+# monotonic_align files
+model/monotonic_align/build/
+model/monotonic_align/core.c
+
+out/
