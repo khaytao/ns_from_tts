@@ -68,6 +68,7 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
             masks.append(mask_down[:, :, :, ::2])
 
         # c forward  - TODO critical -> understand the mask part, it seems it's not needed to save for c
+        # TODO decide how to set x downs to use locked weights and c downs to use trainable weights
         hiddens_c = []
         mask_down_c = mask
         for resnet1, resnet2, attn, downsample in self.downs:
