@@ -25,7 +25,13 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
                  n_spks=None, spk_emb_dim=64, n_feats=80, pe_scale=1000):
         super(GradLogPEstimator2dWithControlNet, self).__init__(dim, dim_mults, groups, n_spks, spk_emb_dim, n_feats, pe_scale)
 
-        self.z1 = zero_conv(self.n_feats, self.n_feats)
+        self.z_input = zero_conv(self.n_feats, self.n_feats)
+        self.z_middle = zero_conv(self.n_feats, self.n_feats)
+
+        self.z_downs = torch.nn.ModuleList()
+
+        for i in range(len(self.downs)):
+            self.z_downs.append(zero_conv(self.n_feats, self.n_feats))
 
 
     def forward(self, x, mask, mu, t, c, spk=None):
@@ -42,8 +48,16 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
             x = torch.stack([mu, x, s], 1)
         mask = mask.unsqueeze(1)
 
+        # for now assume c is the same size as x, enforce this later
+        assert c.shape[-1] == x.shape[-1]
+
+        c = self.z_input(c)
+        c = c + x
+
         hiddens = []
         masks = [mask]
+
+        # x forward
         for resnet1, resnet2, attn, downsample in self.downs:
             mask_down = masks[-1]
             x = resnet1(x, mask_down, t)
@@ -53,8 +67,28 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
             x = downsample(x * mask_down)
             masks.append(mask_down[:, :, :, ::2])
 
+        # c forward  - TODO critical -> understand the mask part, it seems it's not needed to save for c
+        hiddens_c = []
+        mask_down_c = mask
+        for resnet1, resnet2, attn, downsample in self.downs:
+            # mask_down = masks[-1]
+            c = resnet1(c, mask_down_c, t)
+            c = resnet2(c, mask_down_c, t)
+            c = attn(c)
+            hiddens_c.append(c)
+            c = downsample(c * mask_down_c)
+            # masks.append(mask_down[:, :, :, ::2])
+            mask_down_c = mask_down_c[:, :, :, ::2]
+
         masks = masks[:-1]
         mask_mid = masks[-1]
+
+        # x middle
+        x = self.mid_block1(x, mask_mid, t)
+        x = self.mid_attn(x)
+        x = self.mid_block2(x, mask_mid, t)
+
+        # x middle
         x = self.mid_block1(x, mask_mid, t)
         x = self.mid_attn(x)
         x = self.mid_block2(x, mask_mid, t)

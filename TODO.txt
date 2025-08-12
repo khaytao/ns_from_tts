@@ -1,0 +1,4 @@
+1. noisy dataset loader into model
+2. add controlnet to diffusion
+3. weight init for controlnet
+4. change tts forward to account for control input
