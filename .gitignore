@@ -21,3 +21,4 @@ model/monotonic_align/build/
 model/monotonic_align/core.c
 
 out/
+patches/

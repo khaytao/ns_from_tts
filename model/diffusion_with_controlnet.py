@@ -25,13 +25,34 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
                  n_spks=None, spk_emb_dim=64, n_feats=80, pe_scale=1000):
         super(GradLogPEstimator2dWithControlNet, self).__init__(dim, dim_mults, groups, n_spks, spk_emb_dim, n_feats, pe_scale)
 
-        self.z_input = zero_conv(self.n_feats, self.n_feats)
-        self.z_middle = zero_conv(self.n_feats, self.n_feats)
+        self.z_input = zero_conv(n_feats, n_feats)
+        self.z_middle = zero_conv(n_feats, n_feats)
 
         self.z_downs = torch.nn.ModuleList()
 
         for i in range(len(self.downs)):
-            self.z_downs.append(zero_conv(self.n_feats, self.n_feats))
+            self.z_downs.append(zero_conv(n_feats, n_feats))
+
+        # parameters needed for controlnet init loop
+        dims = [2 + (1 if n_spks > 1 else 0), *map(lambda m: dim * m, dim_mults)]
+        in_out = list(zip(dims[:-1], dims[1:]))
+        num_resolutions = len(in_out)
+        mid_dim = dims[-1]
+
+        self.control_downs = torch.nn.ModuleList()
+
+        for ind, (dim_in, dim_out) in enumerate(in_out):
+            is_last = ind >= (num_resolutions - 1)
+            self.control_downs.append(torch.nn.ModuleList([
+                       ResnetBlock(dim_in, dim_out, time_emb_dim=dim),
+                       ResnetBlock(dim_out, dim_out, time_emb_dim=dim),
+                       Residual(Rezero(LinearAttention(dim_out))),
+                       Downsample(dim_out) if not is_last else torch.nn.Identity()]))
+
+
+        self.control_mid_block1 = ResnetBlock(mid_dim, mid_dim, time_emb_dim=dim)
+        self.control_mid_attn = Residual(Rezero(LinearAttention(mid_dim)))
+        self.control_mid_block2 = ResnetBlock(mid_dim, mid_dim, time_emb_dim=dim)
 
 
     def forward(self, x, mask, mu, t, c, spk=None):
