@@ -10,6 +10,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 logs/
+tests/pytest*
 # LJSpeech dataset audio files
 resources/filelists/ljspeech/metadata_test.txt
 resources/filelists/ljspeech/metadata_train.txt
