@@ -13,6 +13,8 @@ from einops import rearrange
 from model.base import BaseModule
 from model.diffusion import *
 import torch.nn as nn
+import torch
+from typing import Iterable, Dict
 
 def zero_conv(in_channels, out_channels):
     conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
@@ -28,10 +30,10 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         self.z_input = zero_conv(n_feats, n_feats)
         self.z_middle = zero_conv(n_feats, n_feats)
 
-        self.z_downs = torch.nn.ModuleList()
+        self.z_ups = torch.nn.ModuleList()
 
-        for i in range(len(self.downs)):
-            self.z_downs.append(zero_conv(n_feats, n_feats))
+        for i in range(len(self.ups)):
+            self.z_ups.append(zero_conv(n_feats, n_feats))
 
         # parameters needed for controlnet init loop
         dims = [2 + (1 if n_spks > 1 else 0), *map(lambda m: dim * m, dim_mults)]
@@ -53,6 +55,142 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         self.control_mid_block1 = ResnetBlock(mid_dim, mid_dim, time_emb_dim=dim)
         self.control_mid_attn = Residual(Rezero(LinearAttention(mid_dim)))
         self.control_mid_block2 = ResnetBlock(mid_dim, mid_dim, time_emb_dim=dim)
+
+    @torch.no_grad()
+    def init_weights_from_base(self, state_dict, prefix_to_ignore=None):
+        """
+        Initialize from a *base* (non-control) checkpoint dict.
+
+        Args:
+            state_dict: mapping {param_name: tensor}
+            prefix_to_ignore: str or iterable[str]; any of these prefixes (with or without trailing '.')
+                              will be stripped from keys before matching (e.g., 'decoder.estimator.')
+
+        Steps:
+          1) Normalize keys by stripping prefixes.
+          2) Load all non-control, non-z_* weights into the base.
+          3) Copy corresponding base weights into control mirrors.
+          4) Zero z_input / z_middle / z_downs[*].
+          5) Verify completeness; raise ValueError on missing keys or shape mismatches.
+        """
+        # -------- normalize prefixes & strip keys --------
+        # user-provided prefixes
+
+        if prefix_to_ignore is None:
+            pref_list = []
+        elif isinstance(prefix_to_ignore, str):
+            pref_list = [prefix_to_ignore]
+        else:
+            pref_list = list(prefix_to_ignore)
+
+        # allow both with/without trailing dot; add common wrappers too
+        norm_pfx = []
+        for p in pref_list:
+            if not p:
+                continue
+            norm_pfx.append(p if p.endswith('.') else p + '.')
+            norm_pfx.append(p)  # also allow exact given form
+        norm_pfx += ['module.', 'model.', 'generator.']  # common wrappers
+
+        def strip_prefixes(k):
+            changed = True
+            while changed:
+                changed = False
+                for pf in norm_pfx:
+                    if k.startswith(pf):
+                        k = k[len(pf):]
+                        changed = True
+            return k
+
+        # build normalized state_dict
+        norm_sd = {}
+        for k, v in state_dict.items():
+            nk = strip_prefixes(k)
+            if nk not in norm_sd:  # keep first if collision
+                norm_sd[nk] = v
+
+        # -------- identify expected base keys --------
+        target_sd = self.state_dict()
+
+        def is_control_key(k):
+            return k.startswith('control_')
+
+        def is_z_key(k):
+            root = k.split('.', 1)[0]
+            return root in {'z_input', 'z_middle', 'z_downs'}
+
+        base_keys_expected = {k for k in target_sd.keys()
+                              if not is_control_key(k) and not is_z_key(k)}
+
+        # coverage check
+        missing_base = sorted(k for k in base_keys_expected if k not in norm_sd)
+        if missing_base:
+            preview = ", ".join(missing_base[:10])
+            raise ValueError(
+                f"init_weights_from_base: missing {len(missing_base)} required base keys "
+                f"after prefix stripping. First few: {preview}"
+            )
+
+        # -------- load base subset --------
+        base_subset = {k: norm_sd[k] for k in base_keys_expected}
+        self.load_state_dict(base_subset, strict=False)
+
+        # -------- map base -> control and copy --------
+        def map_to_control(k):
+            if k.startswith("downs."):
+                return "control_" + k  # downs.N.* -> control_downs.N.*
+            if k.startswith("mid_block1."):
+                return "control_mid_block1." + k[len("mid_block1."):]
+            if k.startswith("mid_attn."):
+                return "control_mid_attn." + k[len("mid_attn."):]
+            if k.startswith("mid_block2."):
+                return "control_mid_block2." + k[len("mid_block2."):]
+            return None  # ups.*, final_block, final_conv not mirrored
+
+        copied_to_control = 0
+        control_shape_mismatch = []
+
+        # refresh view after base load
+        target_sd = self.state_dict()
+
+        for k in base_keys_expected:
+            dst = map_to_control(k)
+            if dst is None:
+                continue
+            if dst in target_sd:
+                src_tensor = target_sd[k]
+                dst_tensor = target_sd[dst]
+                if dst_tensor.shape != src_tensor.shape:
+                    control_shape_mismatch.append(
+                        (dst, tuple(dst_tensor.shape), tuple(src_tensor.shape))
+                    )
+                else:
+                    dst_tensor.copy_(src_tensor)
+                    copied_to_control += 1
+
+        if control_shape_mismatch:
+            examples = "; ".join(f"{k}: got {sd}, want {ss}"
+                                 for k, sd, ss in control_shape_mismatch[:10])
+            raise ValueError(
+                f"init_weights_from_base: {len(control_shape_mismatch)} control targets have shape "
+                f"mismatches after base load. Examples: {examples}"
+            )
+
+        # -------- zero all z_* taps explicitly --------
+        zeroed = 0
+        for m in [self.z_input, self.z_middle, *list(self.z_downs)]:
+            if hasattr(m, "weight") and m.weight is not None:
+                nn.init.zeros_(m.weight)
+                zeroed += 1
+            if hasattr(m, "bias") and m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+        return {
+            "loaded_base_params": len(base_subset),
+            "copied_to_control": copied_to_control,
+            "zero_convs_zeroed": zeroed,
+            "prefixes_stripped": list(dict.fromkeys(norm_pfx)),  # unique, preserve order
+        }
 
 
     def forward(self, x, mask, mu, t, c, spk=None):
@@ -78,21 +216,22 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         hiddens = []
         masks = [mask]
 
-        # x forward
-        for resnet1, resnet2, attn, downsample in self.downs:
-            mask_down = masks[-1]
-            x = resnet1(x, mask_down, t)
-            x = resnet2(x, mask_down, t)
-            x = attn(x)
-            hiddens.append(x)
-            x = downsample(x * mask_down)
-            masks.append(mask_down[:, :, :, ::2])
+        # x downs
+        with torch.no_grad():
+            for resnet1, resnet2, attn, downsample in self.downs:
+                mask_down = masks[-1]
+                x = resnet1(x, mask_down, t)
+                x = resnet2(x, mask_down, t)
+                x = attn(x)
+                hiddens.append(x)
+                x = downsample(x * mask_down)
+                masks.append(mask_down[:, :, :, ::2])
 
-        # c forward  - TODO critical -> understand the mask part, it seems it's not needed to save for c
+        # c downs  - TODO critical -> understand the mask part, it seems it's not needed to save for c
         # TODO decide how to set x downs to use locked weights and c downs to use trainable weights
         hiddens_c = []
         mask_down_c = mask
-        for resnet1, resnet2, attn, downsample in self.downs:
+        for resnet1, resnet2, attn, downsample in self.control_downs:
             # mask_down = masks[-1]
             c = resnet1(c, mask_down_c, t)
             c = resnet2(c, mask_down_c, t)
@@ -105,26 +244,34 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         masks = masks[:-1]
         mask_mid = masks[-1]
 
-        # x middle
-        x = self.mid_block1(x, mask_mid, t)
-        x = self.mid_attn(x)
-        x = self.mid_block2(x, mask_mid, t)
+
+
+        # c middle
+        c = self.control_mid_block1mid_block1(c, mask_mid, t)
+        c = self.control_mid_attn(c)
+        c = self.control_mid_block2(c, mask_mid, t)
 
         # x middle
-        x = self.mid_block1(x, mask_mid, t)
-        x = self.mid_attn(x)
-        x = self.mid_block2(x, mask_mid, t)
+        with torch.no_grad():
+            x = self.mid_block1(x, mask_mid, t)
+            x = self.mid_attn(x)
+            x = self.mid_block2(x, mask_mid, t)
+            x = x + c
 
-        for resnet1, resnet2, attn, upsample in self.ups:
+        # Ups
+        for (resnet1, resnet2, attn, upsample), z_up in zip(self.ups, self.z_ups):
             mask_up = masks.pop()
-            x = torch.cat((x, hiddens.pop()), dim=1)
+            skip = hiddens.pop()
+            c_skip = hiddens_c.pop()
+            x = torch.cat((x, skip + z_up(c_skip)), dim=1)
             x = resnet1(x, mask_up, t)
             x = resnet2(x, mask_up, t)
             x = attn(x)
             x = upsample(x * mask_up)
 
-        x = self.final_block(x, mask)
-        output = self.final_conv(x * mask)
+        with torch.no_grad():
+            x = self.final_block(x, mask)
+            output = self.final_conv(x * mask)
 
         return (output * mask).squeeze(1)
 

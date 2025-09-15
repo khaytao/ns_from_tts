@@ -2,10 +2,17 @@ import importlib
 import torch
 from torch import nn
 import pytest
-
+import os
 from model.diffusion_with_controlnet import *
 # Import zero_conv from your module
 
+
+from model.diffusion_with_controlnet import GradLogPEstimator2dWithControlNet
+
+pytest.importorskip("model.diffusion_with_controlnet")
+from model.diffusion_with_controlnet import DiffusionWithControlNet
+
+CKPT_PATH = "../checkpts/grad-tts.pt"
 
 @pytest.mark.parametrize("in_ch,out_ch", [(1, 1), (3, 5), (80, 80)])
 def test_zero_conv_init_and_shapes(in_ch, out_ch):
@@ -53,25 +60,6 @@ def test_zero_conv_grad_flow():
     # Grad norms should be > 0 for a generic random target
     assert z.weight.grad.norm().item() > 0
     assert z.bias.grad.norm().item() > 0
-
-
-
-
-# # Import base & controlnet modules
-# base_mod = importlib.import_module("model.diffusion")                      # original UNet parts
-# ctrl_mod = importlib.import_module("model.diffusion_with_controlnet")      # your subclass
-#
-# GradLogPEstimator2d = getattr(base_mod, "GradLogPEstimator2d")
-# ResnetBlock = getattr(base_mod, "ResnetBlock")
-# Residual = getattr(base_mod, "Residual")
-# Rezero = getattr(base_mod, "Rezero")
-# LinearAttention = getattr(base_mod, "LinearAttention")
-# Downsample = getattr(base_mod, "Downsample")
-#
-# GradLogPEstimator2dWithControlNet = getattr(
-#     ctrl_mod, "GradLogPEstimator2dWithControlNet"
-# )
-# zero_conv = getattr(ctrl_mod, "zero_conv")
 
 
 @pytest.mark.parametrize(
@@ -143,3 +131,125 @@ def test_zero_conv_factory_behaviour():
     y = z(x)
     assert y.shape == (2, 11, 5, 9)
     assert torch.allclose(y, torch.zeros_like(y))
+
+
+def _unwrap_state_dict(loaded, key_hint=None):
+    """
+    Accepts whatever torch.load returned and extracts a plain state_dict:
+    - if already a dict of tensors, return as-is
+    - else try common wrappers: key_hint, 'model', 'state_dict'
+    - strip common DDP prefixes (module./model.)
+    """
+    # 1) Pick the mapping that holds tensors
+    sd = None
+    if isinstance(loaded, dict):
+        # Try the hint first if provided
+        if key_hint and isinstance(loaded.get(key_hint), dict):
+            sd = loaded[key_hint]
+        elif all(isinstance(v, torch.Tensor) for v in loaded.values()):
+            sd = loaded
+        elif isinstance(loaded.get("model"), dict):
+            sd = loaded["model"]
+        elif isinstance(loaded.get("state_dict"), dict):
+            sd = loaded["state_dict"]
+
+    if sd is None or not isinstance(sd, dict):
+        raise AssertionError("Could not find a model state_dict in checkpoint: "
+                             "checked key_hint, 'model', and 'state_dict'")
+
+    # 2) Normalize common prefixes
+    def strip_prefix(k):
+        for pfx in ("module.", "model.", "generator."):
+            if k.startswith(pfx):
+                return k[len(pfx):]
+        return k
+
+    return {strip_prefix(k): v for k, v in sd.items()}
+
+
+@pytest.mark.skipif(not os.path.exists(CKPT_PATH), reason=f"Missing checkpoint: {CKPT_PATH}")
+def test_init_weights_from_base_checkpoint(tmp_path):
+    # ---- Load checkpoint ----
+    loaded = torch.load(CKPT_PATH, map_location="cpu")
+    sd = _unwrap_state_dict(loaded)
+
+    # ---- Instantiate model (adjust if your arch differs) ----
+    # Common Grad-TTS defaults: dim=128, dim_mults=(1,2,4), n_spks=1, n_feats=80
+    model = GradLogPEstimator2dWithControlNet(
+        dim=64, dim_mults=(1, 2, 4), n_spks=1, n_feats=80, pe_scale=1000
+    ).cpu()
+
+    # Sanity: ensure expected attributes exist
+    assert hasattr(model, "downs") and hasattr(model, "control_downs")
+    assert hasattr(model, "z_input") and hasattr(model, "z_middle") and hasattr(model, "z_downs")
+
+    # ---- Initialize from base checkpoint ----
+    weight_prefix = "decoder.estimator"
+    summary = model.init_weights_from_base(sd, prefix_to_ignore=weight_prefix)
+
+    # Basic summary signals
+    assert summary["loaded_base_params"] > 0
+    assert summary["copied_to_control"] > 0
+
+    # ---- Zero-conv taps must be exactly zero ----
+    with torch.no_grad():
+        for z in [model.z_input, model.z_middle, *list(model.z_downs)]:
+            assert torch.count_nonzero(z.weight) == 0
+            assert torch.count_nonzero(z.bias) == 0
+
+    # ---- Spot-check: a sample of base -> control tensors must match ----
+    # Collect a few representative keys that should be mirrored
+    model_sd = model.state_dict()
+    mirrored_pairs = []
+    for k in model_sd.keys():
+        # map base -> control name the same way init_weights_from_base does
+        if k.startswith("downs."):
+            mirrored_pairs.append((k, "control_" + k))
+        elif k.startswith("mid_block1."):
+            mirrored_pairs.append((k, "control_mid_block1." + k[len("mid_block1."):]))
+        elif k.startswith("mid_attn."):
+            mirrored_pairs.append((k, "control_mid_attn." + k[len("mid_attn."):]))
+        elif k.startswith("mid_block2."):
+            mirrored_pairs.append((k, "control_mid_block2." + k[len("mid_block2."):]))
+        # Only need a subset
+        if len(mirrored_pairs) >= 12:
+            break
+
+    assert mirrored_pairs, "No mirrored base/control key pairs found to check"
+
+    # Compare tensors for equality
+    for base_k, ctrl_k in mirrored_pairs:
+        if ctrl_k in model_sd and model_sd[base_k].shape == model_sd[ctrl_k].shape:
+            assert torch.allclose(model_sd[base_k], model_sd[ctrl_k]), \
+                f"Mismatch between {base_k} and {ctrl_k}"
+
+    # ---- Extra check: base tensors equal checkpoint where shapes match ----
+    # Strip the same prefix we ignored during init so keys line up.
+
+    def strip_prefix(k: str, pfx: str) -> str:
+        pfx_dot = pfx + "."
+        return k[len(pfx_dot):] if k.startswith(pfx_dot) else k
+
+    checked = 0
+    for k, v in sd.items():
+        nk = strip_prefix(k, weight_prefix)
+        if nk in model_sd and model_sd[nk].shape == v.shape:
+            assert torch.allclose(model_sd[nk], v), f"Base weight mismatch for {nk}"
+            checked += 1
+            if checked >= 10:
+                break
+    assert checked > 0, "No overlapping base keys found after prefix stripping"
+
+
+
+
+def _randomize_params(model, seed=123):
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    with torch.no_grad():
+        for p in model.parameters():
+            if p.is_floating_point():
+                p.copy_(torch.randn_like(p, generator=g))
+            else:
+                # Leave non-float tensors (e.g., buffers or ints) unchanged
+                pass
+
