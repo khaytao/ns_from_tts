@@ -242,6 +242,42 @@ def test_init_weights_from_base_checkpoint(tmp_path):
 
 
 
+@pytest.mark.parametrize("B,n_feats,T,dim,dim_mults", [
+    # n_feats=2 keeps channels aligned with your current forward (stacked [mu,x] → 2)
+    (16, 80, 172, 64, (1, 2)),
+])
+def test_first_forward_equal_values(B, n_feats, T, dim, dim_mults):
+    """
+    Smoke test: run forward once to ensure no exceptions are raised and the
+    output shape matches [B, n_feats, T].
+    """
+    device = "cpu"
+
+    model_ref = GradLogPEstimator2d(
+        dim=dim, n_spks=1).to(device)
+
+    model = GradLogPEstimator2dWithControlNet(
+        dim=dim, n_spks=1).to(device)
+
+    model.init_weights_from_base(model_ref.state_dict())
+    # Inputs
+    x = torch.randn(B, n_feats, T, device=device)
+    mu = torch.randn(B, n_feats, T, device=device)
+    mask = torch.ones(B, 1, T, device=device)
+    t = torch.rand(B, device=device)
+
+    # Control input `c` goes through a Conv2d in forward; it must be 4D:
+    # [B, C=n_feats, H=n_feats, W=T]. This keeps channel dims aligned with x after stacking.
+    # c = x.unsqueeze(1).repeat(1, n_feats, 1, 1).contiguous()
+
+    c = x.clone() # add channel dim
+    y_ref = model_ref(x, mask, mu, t)
+    y = model(x, mask, mu, t, c)
+
+    assert torch.allclose(y, y_ref), "Forward output mismatch between base and control ref models"
+    # assert isinstance(y, torch.Tensor)
+    # assert y.shape == (B, n_feats, T)
+
 
 def _randomize_params(model, seed=123):
     g = torch.Generator(device="cpu").manual_seed(seed)
@@ -253,3 +289,11 @@ def _randomize_params(model, seed=123):
                 # Leave non-float tensors (e.g., buffers or ints) unchanged
                 pass
 
+def test_load_weights_from_model():
+    model_ref = GradLogPEstimator2d(
+        dim=64, n_spks=1)
+
+    model = GradLogPEstimator2dWithControlNet(
+        dim=64, n_spks=1)
+
+    model.init_weights_from_base(model_ref.state_dict())

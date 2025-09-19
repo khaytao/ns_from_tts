@@ -16,6 +16,13 @@ import torch.nn as nn
 import torch
 from typing import Iterable, Dict
 
+
+# def apply_z(c, z):
+#     """
+#     adds channel dimension and applies z, then removes channel dimension
+#     """
+#     return z(c[:, None, :,:]).squeeze(1)
+
 def zero_conv(in_channels, out_channels):
     conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
     nn.init.zeros_(conv.weight)
@@ -27,13 +34,12 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
                  n_spks=None, spk_emb_dim=64, n_feats=80, pe_scale=1000):
         super(GradLogPEstimator2dWithControlNet, self).__init__(dim, dim_mults, groups, n_spks, spk_emb_dim, n_feats, pe_scale)
 
-        self.z_input = zero_conv(n_feats, n_feats)
-        self.z_middle = zero_conv(n_feats, n_feats)
+
 
         self.z_ups = torch.nn.ModuleList()
 
-        for i in range(len(self.ups)):
-            self.z_ups.append(zero_conv(n_feats, n_feats))
+        # for i in range(len(self.ups)):
+        #     self.z_ups.append(zero_conv(n_feats, n_feats))
 
         # parameters needed for controlnet init loop
         dims = [2 + (1 if n_spks > 1 else 0), *map(lambda m: dim * m, dim_mults)]
@@ -41,6 +47,9 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         num_resolutions = len(in_out)
         mid_dim = dims[-1]
 
+
+        self.z_input = zero_conv(dims[0], dims[0])
+        self.z_middle = zero_conv(mid_dim, mid_dim)
         self.control_downs = torch.nn.ModuleList()
 
         for ind, (dim_in, dim_out) in enumerate(in_out):
@@ -51,6 +60,8 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
                        Residual(Rezero(LinearAttention(dim_out))),
                        Downsample(dim_out) if not is_last else torch.nn.Identity()]))
 
+        for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
+            self.z_ups.append(zero_conv(dim_out, dim_out))
 
         self.control_mid_block1 = ResnetBlock(mid_dim, mid_dim, time_emb_dim=dim)
         self.control_mid_attn = Residual(Rezero(LinearAttention(mid_dim)))
@@ -117,7 +128,7 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
 
         def is_z_key(k):
             root = k.split('.', 1)[0]
-            return root in {'z_input', 'z_middle', 'z_downs'}
+            return root in {'z_input', 'z_middle', 'z_ups'}
 
         base_keys_expected = {k for k in target_sd.keys()
                               if not is_control_key(k) and not is_z_key(k)}
@@ -178,7 +189,7 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
 
         # -------- zero all z_* taps explicitly --------
         zeroed = 0
-        for m in [self.z_input, self.z_middle, *list(self.z_downs)]:
+        for m in [self.z_input, self.z_middle, *list(self.ups)]:
             if hasattr(m, "weight") and m.weight is not None:
                 nn.init.zeros_(m.weight)
                 zeroed += 1
@@ -202,12 +213,14 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
 
         if self.n_spks < 2:
             x = torch.stack([mu, x], 1)
+            c = torch.stack([mu, c], 1)
         else:
-            s = s.unsqueeze(-1).repeat(1, 1, x.shape[-1])
-            x = torch.stack([mu, x, s], 1)
+            raise NotImplementedError("Controlled Diffusion with multiple speakers not implemented")
+            # s = s.unsqueeze(-1).repeat(1, 1, x.shape[-1])
+            # x = torch.stack([mu, x, s], 1)
         mask = mask.unsqueeze(1)
 
-        # for now assume c is the same size as x, enforce this later
+        # for now assume c is the same size as x
         assert c.shape[-1] == x.shape[-1]
 
         c = self.z_input(c)
@@ -228,7 +241,7 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
                 masks.append(mask_down[:, :, :, ::2])
 
         # c downs  - TODO critical -> understand the mask part, it seems it's not needed to save for c
-        # TODO decide how to set x downs to use locked weights and c downs to use trainable weights
+
         hiddens_c = []
         mask_down_c = mask
         for resnet1, resnet2, attn, downsample in self.control_downs:
@@ -244,12 +257,11 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         masks = masks[:-1]
         mask_mid = masks[-1]
 
-
-
         # c middle
-        c = self.control_mid_block1mid_block1(c, mask_mid, t)
+        c = self.control_mid_block1(c, mask_mid, t)
         c = self.control_mid_attn(c)
         c = self.control_mid_block2(c, mask_mid, t)
+        c = self.z_middle(c)
 
         # x middle
         with torch.no_grad():
