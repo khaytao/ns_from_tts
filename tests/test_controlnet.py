@@ -7,7 +7,7 @@ from model.diffusion_with_controlnet import *
 # Import zero_conv from your module
 
 
-from model.diffusion_with_controlnet import GradLogPEstimator2dWithControlNet
+# from model.diffusion_with_controlnet import GradLogPEstimator2dWithControlNet
 
 pytest.importorskip("model.diffusion_with_controlnet")
 from model.diffusion_with_controlnet import DiffusionWithControlNet
@@ -82,14 +82,14 @@ def test_controlnet_init_structure(n_spks, dim, dim_mults, n_feats):
     assert isinstance(m.mid_attn, Residual)
     assert isinstance(m.mid_block2, ResnetBlock)
 
-    # ControlNet taps (as implemented now): z_input, z_middle, z_downs
+    # ControlNet taps (as implemented now): z_input, z_middle, z_ups
     assert isinstance(m.z_input, nn.Conv2d)
     assert isinstance(m.z_middle, nn.Conv2d)
-    assert isinstance(m.z_downs, nn.ModuleList)
-    assert len(m.z_downs) == len(m.downs)
+    assert isinstance(m.z_ups, nn.ModuleList)
+    assert len(m.z_ups) == len(m.ups)
 
     # zero_conv properties: 1x1, zeros at init
-    for conv in [m.z_input, m.z_middle, *list(m.z_downs)]:
+    for conv in [m.z_input, m.z_middle, *list(m.z_ups)]:
         assert conv.kernel_size == (1, 1)
         assert torch.count_nonzero(conv.weight) == 0
         assert torch.count_nonzero(conv.bias) == 0
@@ -181,7 +181,7 @@ def test_init_weights_from_base_checkpoint(tmp_path):
 
     # Sanity: ensure expected attributes exist
     assert hasattr(model, "downs") and hasattr(model, "control_downs")
-    assert hasattr(model, "z_input") and hasattr(model, "z_middle") and hasattr(model, "z_downs")
+    assert hasattr(model, "z_input") and hasattr(model, "z_middle") and hasattr(model, "z_ups")
 
     # ---- Initialize from base checkpoint ----
     weight_prefix = "decoder.estimator"
@@ -193,7 +193,7 @@ def test_init_weights_from_base_checkpoint(tmp_path):
 
     # ---- Zero-conv taps must be exactly zero ----
     with torch.no_grad():
-        for z in [model.z_input, model.z_middle, *list(model.z_downs)]:
+        for z in [model.z_input, model.z_middle, *list(model.z_ups)]:
             assert torch.count_nonzero(z.weight) == 0
             assert torch.count_nonzero(z.bias) == 0
 
@@ -297,3 +297,41 @@ def test_load_weights_from_model():
         dim=64, n_spks=1)
 
     model.init_weights_from_base(model_ref.state_dict())
+
+
+
+
+@pytest.mark.parametrize("B,n_feats,T,dim,dim_mults", [
+    # n_feats=2 keeps channels aligned with your current forward (stacked [mu,x] → 2)
+    (16, 80, 172, 64, (1, 2)),
+])
+def test_weight_change(B, n_feats, T, dim, dim_mults):
+    device = "cpu"
+    model = GradLogPEstimator2dWithControlNet(
+        dim=64, n_spks=1).to(device)
+
+    # model = GradLogPEstimator2d(
+    #     dim=64, n_spks=1)
+
+    model.zero_grad()
+    x = torch.randn(B, n_feats, T, device=device)
+    mu = torch.randn(B, n_feats, T, device=device)
+    mask = torch.ones(B, 1, T, device=device)
+    t = torch.rand(B, device=device)
+
+    c = x.clone()
+    y = model(x, mask, mu, t, c)
+    # y = model(x, mask, mu, t)
+
+    loss = (y ** 2).mean()
+
+    # Backward
+    loss.backward()
+
+    # Assert: base params have no grads
+    base_with_grad = [n for n, p in model.named_parameters() if is_base_layer(n) and p.grad is not None]
+    assert not base_with_grad, f"Base params unexpectedly have grads: {base_with_grad[:5]}"
+
+    # Assert: control/tap path receives gradients (at least one param)
+    control_grads = [(n, p) for n, p in model.named_parameters() if is_control_layer(n) and p.grad is not None]
+    assert control_grads, "No gradients found in control/tap parameters"

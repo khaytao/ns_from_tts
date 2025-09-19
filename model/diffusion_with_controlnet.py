@@ -17,11 +17,19 @@ import torch
 from typing import Iterable, Dict
 
 
-# def apply_z(c, z):
-#     """
-#     adds channel dimension and applies z, then removes channel dimension
-#     """
-#     return z(c[:, None, :,:]).squeeze(1)
+def is_control_layer(name: str) -> bool:
+    # control branches and zero-conv taps
+    return name.startswith("control_")
+
+def _is_zero_conv_layer(name: str) -> bool:
+    # control branches and zero-conv taps
+    return name.startswith("z_input") \
+    or name.startswith("z_middle") \
+    or name.startswith("z_downs") \
+    or name.startswith("z_ups")
+
+def is_base_layer(name: str) -> bool:
+    return not (is_control_layer(name) or _is_zero_conv_layer(name))
 
 def zero_conv(in_channels, out_channels):
     conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
@@ -34,12 +42,7 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
                  n_spks=None, spk_emb_dim=64, n_feats=80, pe_scale=1000):
         super(GradLogPEstimator2dWithControlNet, self).__init__(dim, dim_mults, groups, n_spks, spk_emb_dim, n_feats, pe_scale)
 
-
-
         self.z_ups = torch.nn.ModuleList()
-
-        # for i in range(len(self.ups)):
-        #     self.z_ups.append(zero_conv(n_feats, n_feats))
 
         # parameters needed for controlnet init loop
         dims = [2 + (1 if n_spks > 1 else 0), *map(lambda m: dim * m, dim_mults)]
@@ -66,6 +69,11 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         self.control_mid_block1 = ResnetBlock(mid_dim, mid_dim, time_emb_dim=dim)
         self.control_mid_attn = Residual(Rezero(LinearAttention(mid_dim)))
         self.control_mid_block2 = ResnetBlock(mid_dim, mid_dim, time_emb_dim=dim)
+
+
+        for name, p in self.named_parameters():
+            if is_base_layer(name):
+                p.requires_grad = False
 
     @torch.no_grad()
     def init_weights_from_base(self, state_dict, prefix_to_ignore=None):
@@ -230,15 +238,14 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         masks = [mask]
 
         # x downs
-        with torch.no_grad():
-            for resnet1, resnet2, attn, downsample in self.downs:
-                mask_down = masks[-1]
-                x = resnet1(x, mask_down, t)
-                x = resnet2(x, mask_down, t)
-                x = attn(x)
-                hiddens.append(x)
-                x = downsample(x * mask_down)
-                masks.append(mask_down[:, :, :, ::2])
+        for resnet1, resnet2, attn, downsample in self.downs:
+            mask_down = masks[-1]
+            x = resnet1(x, mask_down, t)
+            x = resnet2(x, mask_down, t)
+            x = attn(x)
+            hiddens.append(x)
+            x = downsample(x * mask_down)
+            masks.append(mask_down[:, :, :, ::2])
 
         # c downs  - TODO critical -> understand the mask part, it seems it's not needed to save for c
 
@@ -264,11 +271,10 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         c = self.z_middle(c)
 
         # x middle
-        with torch.no_grad():
-            x = self.mid_block1(x, mask_mid, t)
-            x = self.mid_attn(x)
-            x = self.mid_block2(x, mask_mid, t)
-            x = x + c
+        x = self.mid_block1(x, mask_mid, t)
+        x = self.mid_attn(x)
+        x = self.mid_block2(x, mask_mid, t)
+        x = x + c
 
         # Ups
         for (resnet1, resnet2, attn, upsample), z_up in zip(self.ups, self.z_ups):
@@ -281,9 +287,8 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
             x = attn(x)
             x = upsample(x * mask_up)
 
-        with torch.no_grad():
-            x = self.final_block(x, mask)
-            output = self.final_conv(x * mask)
+        x = self.final_block(x, mask)
+        output = self.final_conv(x * mask)
 
         return (output * mask).squeeze(1)
 
