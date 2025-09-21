@@ -21,15 +21,18 @@ def is_control_layer(name: str) -> bool:
     # control branches and zero-conv taps
     return name.startswith("control_")
 
+
 def _is_zero_conv_layer(name: str) -> bool:
     # control branches and zero-conv taps
     return name.startswith("z_input") \
-    or name.startswith("z_middle") \
-    or name.startswith("z_downs") \
-    or name.startswith("z_ups")
+        or name.startswith("z_middle") \
+        or name.startswith("z_downs") \
+        or name.startswith("z_ups")
+
 
 def is_base_layer(name: str) -> bool:
     return not (is_control_layer(name) or _is_zero_conv_layer(name))
+
 
 def zero_conv(in_channels, out_channels):
     conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
@@ -37,10 +40,12 @@ def zero_conv(in_channels, out_channels):
     nn.init.zeros_(conv.bias)
     return conv
 
+
 class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
     def __init__(self, dim, dim_mults=(1, 2, 4), groups=8,
                  n_spks=None, spk_emb_dim=64, n_feats=80, pe_scale=1000):
-        super(GradLogPEstimator2dWithControlNet, self).__init__(dim, dim_mults, groups, n_spks, spk_emb_dim, n_feats, pe_scale)
+        super(GradLogPEstimator2dWithControlNet, self).__init__(dim, dim_mults, groups, n_spks, spk_emb_dim, n_feats,
+                                                                pe_scale)
 
         self.z_ups = torch.nn.ModuleList()
 
@@ -50,7 +55,6 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         num_resolutions = len(in_out)
         mid_dim = dims[-1]
 
-
         self.z_input = zero_conv(dims[0], dims[0])
         self.z_middle = zero_conv(mid_dim, mid_dim)
         self.control_downs = torch.nn.ModuleList()
@@ -58,10 +62,10 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         for ind, (dim_in, dim_out) in enumerate(in_out):
             is_last = ind >= (num_resolutions - 1)
             self.control_downs.append(torch.nn.ModuleList([
-                       ResnetBlock(dim_in, dim_out, time_emb_dim=dim),
-                       ResnetBlock(dim_out, dim_out, time_emb_dim=dim),
-                       Residual(Rezero(LinearAttention(dim_out))),
-                       Downsample(dim_out) if not is_last else torch.nn.Identity()]))
+                ResnetBlock(dim_in, dim_out, time_emb_dim=dim),
+                ResnetBlock(dim_out, dim_out, time_emb_dim=dim),
+                Residual(Rezero(LinearAttention(dim_out))),
+                Downsample(dim_out) if not is_last else torch.nn.Identity()]))
 
         for ind, (dim_in, dim_out) in enumerate(reversed(in_out[1:])):
             self.z_ups.append(zero_conv(dim_out, dim_out))
@@ -69,7 +73,6 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         self.control_mid_block1 = ResnetBlock(mid_dim, mid_dim, time_emb_dim=dim)
         self.control_mid_attn = Residual(Rezero(LinearAttention(mid_dim)))
         self.control_mid_block2 = ResnetBlock(mid_dim, mid_dim, time_emb_dim=dim)
-
 
         for name, p in self.named_parameters():
             if is_base_layer(name):
@@ -211,7 +214,6 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
             "prefixes_stripped": list(dict.fromkeys(norm_pfx)),  # unique, preserve order
         }
 
-
     def forward(self, x, mask, mu, t, c, spk=None):
         if not isinstance(spk, type(None)):
             s = self.spk_mlp(spk)
@@ -293,18 +295,13 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         return (output * mask).squeeze(1)
 
 
-class DiffusionWithControlNet(BaseModule):
+class DiffusionWithControlNet(Diffusion):
     def __init__(self, n_feats, dim,
                  n_spks=1, spk_emb_dim=64,
                  beta_min=0.05, beta_max=20, pe_scale=1000):
-        super(DiffusionWithControlNet, self).__init__()
-        self.n_feats = n_feats
-        self.dim = dim
-        self.n_spks = n_spks
-        self.spk_emb_dim = spk_emb_dim
-        self.beta_min = beta_min
-        self.beta_max = beta_max
-        self.pe_scale = pe_scale
+        super(DiffusionWithControlNet, self).__init__(n_feats, dim,
+                                                      n_spks, spk_emb_dim,
+                                                      beta_min, beta_max, pe_scale)
 
         self.estimator = GradLogPEstimator2dWithControlNet(dim, n_spks=n_spks,
                                                            spk_emb_dim=spk_emb_dim,
@@ -346,6 +343,7 @@ class DiffusionWithControlNet(BaseModule):
     @torch.no_grad()
     def forward(self, z, mask, mu, c, n_timesteps, stoc=False, spk=None):
         return self.reverse_diffusion(z, mask, mu, c, n_timesteps, stoc, spk)
+
 
     def loss_t(self, x0, mask, mu, t, c, spk=None):
         xt, z = self.forward_diffusion(x0, mask, mu, t)
