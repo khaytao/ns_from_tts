@@ -16,6 +16,7 @@ import torch
 
 import params
 from model import GradTTS
+from model import GradTTS_NS
 from text import text_to_sequence, cmudict
 from text.symbols import symbols
 from utils import intersperse
@@ -82,12 +83,13 @@ if __name__ == '__main__':
     num_samples = count_lines(args.file, skip_blank=True)
 
     print('Initializing Grad-TTS...')
-    generator = GradTTS(len(symbols)+1, params.n_spks, params.spk_emb_dim,
+    generator = GradTTS_NS(len(symbols)+1, params.n_spks, params.spk_emb_dim,
                         params.n_enc_channels, params.filter_channels,
                         params.filter_channels_dp, params.n_heads, params.n_enc_layers,
                         params.enc_kernel, params.enc_dropout, params.window_size,
                         params.n_feats, params.dec_dim, params.beta_min, params.beta_max, params.pe_scale)
-    generator.load_state_dict(torch.load(args.checkpoint, map_location=lambda loc, storage: loc))
+    # generator.load_state_dict(torch.load(args.checkpoint, map_location=lambda loc, storage: loc))
+    generator.load_weights(args.checkpoint)
     _ = generator.cuda().eval()
     print(f'Number of parameters: {generator.nparams}')
     
@@ -114,8 +116,8 @@ if __name__ == '__main__':
 
     with torch.no_grad():
         for i, item in enumerate(test_batch):
-            mel = item['y']
-            # x = item['x']
+            mel = item['y'].cuda()
+            mel = mel[None, :, :]
 
             print(f'Synthesizing {i} text...', end=' ')
             # x = torch.LongTensor(intersperse(text_to_sequence(text, dictionary=cmu), len(symbols))).cuda()[None]
@@ -123,8 +125,8 @@ if __name__ == '__main__':
             x_lengths = torch.LongTensor([x.shape[-1]]).cuda()
 
             t = dt.datetime.now()
-            y_enc, y_dec, attn = generator.forward(x, x_lengths, n_timesteps=args.timesteps, temperature=1.5,
-                                                   stoc=False, spk=spk, length_scale=0.91)
+            y_enc, y_dec, attn = generator.forward(x, x_lengths, mel, n_timesteps=args.timesteps, temperature=1.5,
+                                                   stoc=False, spk=spk, length_scale=1)
             t = (dt.datetime.now() - t).total_seconds()
             print(f'Grad-TTS RTF: {t * 22050 / (y_dec.shape[-1] * 256)}')
 

@@ -80,7 +80,9 @@ def add_noise(input_dir: str, output_dir: str, snr: float) -> None:
 
 if __name__ == "__main__":
     example_snr = 10  # dB
-    example_input = r"D:\projects\NSTTS\datasets\LJSpeech-1.1\wavs"
-    example_output = f"D:\projects\\NSTTS\datasets\LJSpeech-1.1\\noisy_wavs_{example_snr}dB"
+    # example_input = r"D:\projects\NSTTS\datasets\LJSpeech-1.1\wavs"
+    # example_output = f"D:\projects\\NSTTS\datasets\LJSpeech-1.1\\noisy_wavs_{example_snr}dB"
 
+    example_input = r"D:\datasets\AmEng"
+    example_output = f"D:\datasets\AmEng\\noisy_wavs_{example_snr}dB"
     add_noise(example_input, example_output, example_snr)

@@ -112,7 +112,7 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
                 continue
             norm_pfx.append(p if p.endswith('.') else p + '.')
             norm_pfx.append(p)  # also allow exact given form
-        norm_pfx += ['module.', 'model.', 'generator.']  # common wrappers
+        norm_pfx += ['module.', 'model.', 'generator.', 'decoder.', 'estimator.']  # common wrappers
 
         def strip_prefixes(k):
             changed = True
