@@ -25,3 +25,8 @@ out/
 patches/
 tests/expected_keys.txt
 tests/provided_keys.txt
+
+# LJSpeech dataset fixed
+resources/filelists/ljspeech/test_fixed.txt
+resources/filelists/ljspeech/train_fixed.txt
+resources/filelists/ljspeech/valid_fixed.txt
