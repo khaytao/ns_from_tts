@@ -66,6 +66,8 @@ win_length = params.win_length
 f_min = params.f_min
 f_max = params.f_max
 
+USE_MAS = False
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-f', '--file', type=str, required=True, help='path to a file with texts to synthesize')
@@ -111,7 +113,10 @@ if __name__ == '__main__':
     test_dataset = TextMelDataset(args.file, CMU_PATH, add_blank,
                                   n_fft, n_feats, sample_rate, hop_length,
                                   win_length, f_min, f_max)
-
+    # batch_collate = TextMelBatchCollate()
+    # loader = DataLoader(dataset=test_dataset, batch_size=1,
+    #                     collate_fn=batch_collate, drop_last=True,
+    #                     num_workers=1, shuffle=False)
     test_batch = test_dataset.sample_test_batch(num_samples)
 
     with torch.no_grad():
@@ -123,10 +128,10 @@ if __name__ == '__main__':
             # x = torch.LongTensor(intersperse(text_to_sequence(text, dictionary=cmu), len(symbols))).cuda()[None]
             x = item['x'].to(torch.long).unsqueeze(0).cuda()
             x_lengths = torch.LongTensor([x.shape[-1]]).cuda()
-
+            c_lengths = torch.LongTensor([mel.shape[-1]]).cuda()
             t = dt.datetime.now()
-            y_enc, y_dec, attn = generator.forward(x, x_lengths, mel, n_timesteps=args.timesteps, temperature=1.5,
-                                                   stoc=False, spk=spk, length_scale=1)
+            y_enc, y_dec, attn = generator.forward(x, x_lengths, mel,c_lengths, n_timesteps=args.timesteps, temperature=1.5,
+                                                   stoc=False, spk=spk, length_scale=1, use_mas=USE_MAS)
             t = (dt.datetime.now() - t).total_seconds()
             print(f'Grad-TTS RTF: {t * 22050 / (y_dec.shape[-1] * 256)}')
 

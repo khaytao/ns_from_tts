@@ -25,3 +25,4 @@ out/
 patches/
 tests/expected_keys.txt
 tests/provided_keys.txt
+resources/filelists/clean_lj

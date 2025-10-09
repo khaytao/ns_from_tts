@@ -184,3 +184,133 @@ class TextMelSpeakerBatchCollate(object):
         x_lengths = torch.LongTensor(x_lengths)
         spk = torch.cat(spk, dim=0)
         return {'x': x, 'x_lengths': x_lengths, 'y': y, 'y_lengths': y_lengths, 'spk': spk}
+
+
+class TextMelNoisyMelDataset(torch.utils.data.Dataset):
+    """
+    Returns:
+        item = {
+            'x':  IntTensor [T_text],          # token ids (with blanks if add_blank=True)
+            'y':  FloatTensor [n_mels, T_mel], # clean mel (training target)
+            'c':  FloatTensor [n_mels, T_mel], # noisy mel (control signal)
+        }
+    """
+    def __init__(self, filelist_path, cmudict_path, add_blank=True,
+                 n_fft=1024, n_mels=80, sample_rate=22050,
+                 hop_length=256, win_length=1024, f_min=0., f_max=8000,
+                 snr_db=10.0):
+        self.filepaths_and_text = parse_filelist(filelist_path)
+        self.cmudict = cmudict.CMUDict(cmudict_path)
+        self.add_blank = add_blank
+
+        # mel / audio params (mirror your existing datasets)
+        self.n_fft = n_fft
+        self.n_mels = n_mels
+        self.sample_rate = sample_rate
+        self.hop_length = hop_length
+        self.win_length = win_length
+        self.f_min = f_min
+        self.f_max = f_max
+
+        # noise control
+        self.snr_db = float(snr_db)
+
+        random.seed(random_seed)
+        random.shuffle(self.filepaths_and_text)
+
+    @staticmethod
+    def _add_white_noise(wav: torch.Tensor, snr_db: float, eps: float = 1e-12) -> torch.Tensor:
+        """
+        Add white Gaussian noise to waveform to achieve target SNR (in dB).
+        wav: [C, T] (float, typically mono with C=1)
+        """
+        # use per-sample global power; keep channel dimension
+        sig_power = wav.pow(2).mean(dim=-1, keepdim=True)  # [C,1]
+        noise_power = sig_power / (10.0 ** (snr_db / 10.0))
+        # avoid division by zero for silent clips
+        noise_std = torch.sqrt(torch.clamp(noise_power, min=eps))
+        noise = torch.randn_like(wav) * noise_std
+        return wav + noise
+
+    def _wav_to_mel(self, audio: torch.Tensor) -> torch.Tensor:
+        """
+        audio: [C,T] or [1,T]; returns mel: [n_mels, T_mel]
+        Uses the same mel_spectrogram() as your other datasets.
+        """
+        mel = mel_spectrogram(audio, self.n_fft, self.n_mels, self.sample_rate,
+                              self.hop_length, self.win_length, self.f_min, self.f_max,
+                              center=False).squeeze()  # [n_mels, T_mel]
+        return mel
+
+    def get_pair(self, filepath_and_text):
+        filepath, text = filepath_and_text[0], filepath_and_text[1]
+
+        # text → ids (with optional blanks)
+        text = self.get_text(text, add_blank=self.add_blank)
+
+        # load audio
+        audio, sr = ta.load(filepath)  # [C, T]
+        assert sr == self.sample_rate, f"Expected sr={self.sample_rate}, got {sr}"
+        if audio.size(0) > 1:
+            # mixdown to mono to match training
+            audio = audio.mean(dim=0, keepdim=True)
+
+        # clean mel
+        mel_clean = self._wav_to_mel(audio)
+
+        # noisy waveform + mel
+        noisy_audio = self._add_white_noise(audio, self.snr_db)
+        mel_noisy = self._wav_to_mel(noisy_audio)
+
+        return (text, mel_clean, mel_noisy)
+
+    def get_text(self, text, add_blank=True):
+        text_norm = text_to_sequence(text, dictionary=self.cmudict)
+        if self.add_blank:
+            text_norm = intersperse(text_norm, len(symbols))  # blank id is len(symbols)
+        return torch.IntTensor(text_norm)
+
+    def __getitem__(self, index):
+        text, mel_clean, mel_noisy = self.get_pair(self.filepaths_and_text[index])
+        item = {'x': text, 'y': mel_clean, 'c': mel_noisy}
+        return item
+
+    def __len__(self):
+        return len(self.filepaths_and_text)
+
+    def sample_test_batch(self, size):
+        idx = np.random.choice(range(len(self)), size=size, replace=False)
+        return [self.__getitem__(i) for i in idx]
+
+
+class TextMelNoisyMelBatchCollate(object):
+    def __call__(self, batch):
+        B = len(batch)
+        y_max_length = max(item['y'].shape[-1] for item in batch)
+        y_max_length = fix_len_compatibility(y_max_length)
+        x_max_length = max(item['x'].shape[-1] for item in batch)
+        n_feats = batch[0]['y'].shape[-2]
+
+        y = torch.zeros((B, n_feats, y_max_length), dtype=torch.float32)
+        c = torch.zeros((B, n_feats, y_max_length), dtype=torch.float32)
+        x = torch.zeros((B, x_max_length), dtype=torch.long)
+        y_lengths, x_lengths = [], []
+
+        for i, item in enumerate(batch):
+            y_, c_, x_ = item['y'], item['c'], item['x']
+            T = y_.shape[-1]
+            y_lengths.append(T)
+            x_lengths.append(x_.shape[-1])
+            y[i, :, :T] = y_
+            c[i, :, :T] = c_[:, :T]   # keep c in lockstep with y
+            x[i, :x_.shape[-1]] = x_
+
+        y_lengths = torch.LongTensor(y_lengths)
+        x_lengths = torch.LongTensor(x_lengths)
+        c_lengths = y_lengths.clone()  # same timeline
+
+        return {
+            'x': x, 'x_lengths': x_lengths,
+            'y': y, 'y_lengths': y_lengths,
+            'c': c, 'c_lengths': c_lengths,
+        }
