@@ -71,6 +71,22 @@ def renormalize_durations(
 
     return w_int.unsqueeze(1)  # [B,1,T_text]
 
+def get_active_times_mask(c_pad, c_mask, smooth_k=5, silence_ratio=0.3):
+    B, _, T = c_pad.shape
+    energy = (c_pad ** 2).sum(dim=1, keepdim=True)                 # [B,1,T_pad]
+    if smooth_k and smooth_k > 1:
+        pad = (smooth_k - 1) // 2
+        energy = F.avg_pool1d(energy, kernel_size=smooth_k, stride=1, padding=pad)
+
+    # per-sample threshold: median * silence_ratio (0.2-0.4 typical)
+    med = energy.median(dim=-1, keepdim=True).values               # [B,1,1]
+    thr = med * float(silence_ratio)
+    voiced = (energy >= thr).to(c_mask.dtype)                   # [B,1,T_pad]
+    # keep only valid frames (respect y_mask)
+    voiced = voiced * c_mask
+    return voiced
+
+
 class GradTTS_NS(GradTTS):
 
     def __init__(self, n_vocab, n_spks, spk_emb_dim, n_enc_channels, filter_channels, filter_channels_dp,
@@ -90,7 +106,7 @@ class GradTTS_NS(GradTTS):
         self.encoder.eval()
 
     @torch.no_grad()
-    def forward(self, x, x_lengths, c, n_timesteps, temperature=1.0, stoc=False, spk=None, length_scale=1.0, use_mas=True):
+    def forward(self, x, x_lengths, c, c_lengths, n_timesteps, temperature=1.0, stoc=False, spk=None, length_scale=1.0, use_mas=False):
         """
         Generates mel-spectrogram from text. Returns:
             1. encoder outputs
@@ -108,7 +124,7 @@ class GradTTS_NS(GradTTS):
             length_scale (float, optional): controls speech pace.
                 Increase value to slow down generated speech and vice versa.
         """
-        x, x_lengths = self.relocate_input([x, x_lengths])
+        x, x_lengths, c, c_lengths = self.relocate_input([x, x_lengths, c, c_lengths])
 
         if self.n_spks > 1:
             # Get speaker embedding
@@ -122,6 +138,7 @@ class GradTTS_NS(GradTTS):
         pad = T_pad - T_control
 
         c_pad = F.pad(c, (0, pad)) if pad > 0 else c  # [B, n_feats, T_pad]
+        # c_smooth = F.avg_pool1d(c_pad, kernel_size=5, stride=1, padding=2)  # [B, n_feats, T_pad]
 
         if not use_mas:  # assume based on durations
             # w = torch.exp(logw) * x_mask
@@ -138,20 +155,26 @@ class GradTTS_NS(GradTTS):
             attn = generate_path(w_ceil.squeeze(1), attn_mask.squeeze(1)).unsqueeze(1)
 
         else:  # use MAS
-            with torch.no_grad():
-                const = -0.5 * math.log(2 * math.pi) * self.n_feats
-                factor = -0.5 * torch.ones(mu_x.shape, dtype=mu_x.dtype, device=mu_x.device)
-                y_square = torch.matmul(factor.transpose(1, 2), y ** 2)
-                y_mu_double = torch.matmul(2.0 * (factor * mu_x).transpose(1, 2), y)
-                mu_square = torch.sum(factor * (mu_x ** 2), 1).unsqueeze(-1)
-                log_prior = y_square - y_mu_double + mu_square + const
-                attn_mask = x_mask.unsqueeze(-1) * y_mask.unsqueeze(2)
-                attn = monotonic_align.maximum_path(log_prior, attn_mask.squeeze(1))
-                attn = attn.detach()
-            # Compute loss between predicted log-scaled durations and those obtained from MAS
-            logw_ = torch.log(1e-8 + torch.sum(attn.unsqueeze(1), -1)) * x_mask
-            w = torch.exp(logw_) * x_mask
-            w_ceil = torch.ceil(w) * length_scale
+            c_max_length = c_pad.shape[-1]
+            c_mask = sequence_mask(c_lengths, c_max_length).unsqueeze(1).to(x_mask)
+            # c_mask = c_mask * get_active_times_mask(c_pad, c_mask)
+            const = -0.5 * math.log(2 * math.pi) * self.n_feats
+            factor = -0.5 * torch.ones(mu_x.shape, dtype=mu_x.dtype, device=mu_x.device)
+            y_square = torch.matmul(factor.transpose(1, 2), c_pad ** 2)
+            y_mu_double = torch.matmul(2.0 * (factor * mu_x).transpose(1, 2), c_pad)
+            mu_square = torch.sum(factor * (mu_x ** 2), 1).unsqueeze(-1)
+            log_prior = y_square - y_mu_double + mu_square + const
+            attn_mask = x_mask.unsqueeze(-1) * c_mask.unsqueeze(2)
+            attn = monotonic_align.maximum_path(log_prior, attn_mask.squeeze(1))
+            attn = attn.detach()
+
+            y_max_length = c_max_length
+            y_mask = c_mask
+            # each valid frame should be assigned to exactly one token
+            assert (attn.sum(dim=1)[y_mask.squeeze(1).bool()] == 1).all()
+            # nothing assigned outside mask
+            assert (attn * (1 - attn_mask.squeeze(1))).sum() == 0
+
         # Align encoded text and get mu_y
         mu_y = torch.matmul(attn.squeeze(1).transpose(1, 2), mu_x.transpose(1, 2))
         mu_y = mu_y.transpose(1, 2)
@@ -164,6 +187,78 @@ class GradTTS_NS(GradTTS):
         decoder_outputs = decoder_outputs[:, :, :y_max_length]
 
         return encoder_outputs, decoder_outputs, attn[:, :, :y_max_length]
+
+    def compute_loss(self, x, x_lengths, y, y_lengths, c, c_lengths=None, spk=None, out_size=None):
+        x, x_lengths, y, y_lengths, c, c_lengths = self.relocate_input([x, x_lengths, y, y_lengths, c, c_lengths])
+
+        if self.n_spks > 1:
+            # Get speaker embedding
+            spk = self.spk_emb(spk)
+
+        # Get encoder_outputs `mu_x` and log-scaled token durations `logw`
+        mu_x, logw, x_mask = self.encoder(x, x_lengths, spk)
+        y_max_length = y.shape[-1]
+
+        y_mask = sequence_mask(y_lengths, y_max_length).unsqueeze(1).to(x_mask)
+        attn_mask = x_mask.unsqueeze(-1) * y_mask.unsqueeze(2)
+
+        # Use MAS to find most likely alignment `attn` between text and mel-spectrogram
+        with torch.no_grad():
+            const = -0.5 * math.log(2 * math.pi) * self.n_feats
+            factor = -0.5 * torch.ones(mu_x.shape, dtype=mu_x.dtype, device=mu_x.device)
+            y_square = torch.matmul(factor.transpose(1, 2), y ** 2)
+            y_mu_double = torch.matmul(2.0 * (factor * mu_x).transpose(1, 2), y)
+            mu_square = torch.sum(factor * (mu_x ** 2), 1).unsqueeze(-1)
+            log_prior = y_square - y_mu_double + mu_square + const
+
+            attn = monotonic_align.maximum_path(log_prior, attn_mask.squeeze(1))
+            attn = attn.detach()
+
+        # Compute loss between predicted log-scaled durations and those obtained from MAS
+        logw_ = torch.log(1e-8 + torch.sum(attn.unsqueeze(1), -1)) * x_mask
+        dur_loss = duration_loss(logw, logw_, x_lengths)
+
+        # Cut a small segment of mel-spectrogram in order to increase batch size
+        if not isinstance(out_size, type(None)):
+            max_offset = (y_lengths - out_size).clamp(0)
+            offset_ranges = list(zip([0] * max_offset.shape[0], max_offset.cpu().numpy()))
+            out_offset = torch.LongTensor([
+                torch.tensor(random.choice(range(start, end)) if end > start else 0)
+                for start, end in offset_ranges
+            ]).to(y_lengths)
+
+            attn_cut = torch.zeros(attn.shape[0], attn.shape[1], out_size, dtype=attn.dtype, device=attn.device)
+            y_cut = torch.zeros(y.shape[0], self.n_feats, out_size, dtype=y.dtype, device=y.device)
+            c_cut = torch.zeros(y.shape[0], self.n_feats, out_size, dtype=y.dtype, device=y.device)
+
+            y_cut_lengths = []
+            for i, (y_, c_, out_offset_) in enumerate(zip(y, c, out_offset)):
+                y_cut_length = out_size + (y_lengths[i] - out_size).clamp(None, 0)
+                y_cut_lengths.append(y_cut_length)
+                cut_lower, cut_upper = out_offset_, out_offset_ + y_cut_length
+                y_cut[i, :, :y_cut_length] = y_[:, cut_lower:cut_upper]
+                c_cut[i, :, :y_cut_length] = c_[:, cut_lower:cut_upper]
+                attn_cut[i, :, :y_cut_length] = attn[i, :, cut_lower:cut_upper]
+            y_cut_lengths = torch.LongTensor(y_cut_lengths)
+            y_cut_mask = sequence_mask(y_cut_lengths).unsqueeze(1).to(y_mask)
+
+            attn = attn_cut
+            y = y_cut
+            c = c_cut
+            y_mask = y_cut_mask
+
+        # Align encoded text with mel-spectrogram and get mu_y segment
+        mu_y = torch.matmul(attn.squeeze(1).transpose(1, 2), mu_x.transpose(1, 2))
+        mu_y = mu_y.transpose(1, 2)
+
+        # Compute loss of score-based decoder
+        diff_loss, xt = self.decoder.compute_loss(y, y_mask, mu_y, c, spk)
+
+        # Compute loss between aligned encoder outputs and mel-spectrogram
+        prior_loss = torch.sum(0.5 * ((y - mu_y) ** 2 + math.log(2 * math.pi)) * y_mask)
+        prior_loss = prior_loss / (torch.sum(y_mask) * self.n_feats)
+
+        return dur_loss, prior_loss, diff_loss
 
     def load_weights(self, weights_path):
         state_dict = torch.load(weights_path, map_location=lambda loc, storage: loc)

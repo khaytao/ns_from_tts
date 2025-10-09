@@ -215,8 +215,8 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         }
 
     def forward(self, x, mask, mu, t, c, spk=None):
-        if not isinstance(spk, type(None)):
-            s = self.spk_mlp(spk)
+        # if not isinstance(spk, type(None)):
+        #     s = self.spk_mlp(spk)
 
         t = self.time_pos_emb(t, scale=self.pe_scale)
         t = self.mlp(t)
