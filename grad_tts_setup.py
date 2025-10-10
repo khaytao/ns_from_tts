@@ -9,7 +9,7 @@ torchaudio
 # create ./model/monotonic_align/model/monotonic_align
 import os
 from fix_path_to_dataset import generate_filelist, get_audio_dir
-import controlnet_params
+
 if not os.path.exists('./model/'):
     raise FileNotFoundError("Directory ./model does not exist, cannot setup model/monotonic_align")
 if not os.path.exists('./model/monotonic_align'):
@@ -23,6 +23,7 @@ if not os.path.exists('./model/monotonic_align/model/monotonic_align'):
 
 # create appropriate dataset
 audio_dir = get_audio_dir()
+import controlnet_params
 file_dirs = [controlnet_params.train_filelist_path, controlnet_params.valid_filelist_path, controlnet_params.test_filelist_path]
 for d in file_dirs:
     generate_filelist(d, audio_dir)
