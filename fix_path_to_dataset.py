@@ -77,13 +77,7 @@ def get_audio_dir() -> Path:
         sys.exit(1)
     return d
 
-def main():
-    filelists_dir = find_filelists_dir()
-    audio_dir = get_audio_dir()
-
-    print(f"📄 Filelists dir: {filelists_dir}")
-    print(f"🎧 Audio dir:     {audio_dir}")
-
+def generate_filelist(filelists_dir: Path, audio_dir: Path):
     # Only process plain .txt (skip already fixed files)
     txt_files = sorted(p for p in filelists_dir.glob("*.txt") if not p.name.endswith("_fixed.txt"))
     if not txt_files:
@@ -123,6 +117,15 @@ def main():
         dst.write_text("".join(out), encoding="utf-8")
         print(f"   done. lines={total}, fixed={fixed}, missing={missing} (kept as-is)")
 
+
+def main():
+    filelists_dir = find_filelists_dir()
+    audio_dir = get_audio_dir()
+
+    print(f"📄 Filelists dir: {filelists_dir}")
+    print(f"🎧 Audio dir:     {audio_dir}")
+
+    generate_filelist(filelists_dir, audio_dir)
     print("✅ All done.")
 
 if __name__ == "__main__":
