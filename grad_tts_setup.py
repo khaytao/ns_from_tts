@@ -10,16 +10,16 @@ torchaudio
 import os
 from fix_path_to_dataset import generate_filelist, get_audio_dir
 
-if not os.path.exists('./model/'):
-    raise FileNotFoundError("Directory ./model does not exist, cannot setup model/monotonic_align")
-if not os.path.exists('./model/monotonic_align'):
-    raise FileNotFoundError("Directory ./model/monotonic_align does not exist, cannot setup model/monotonic_align")
-
-if not os.path.exists('./model/monotonic_align/model'):
-    os.mkdir('./model/monotonic_align/model')
-
-if not os.path.exists('./model/monotonic_align/model/monotonic_align'):
-    os.mkdir('./model/monotonic_align/model/monotonic_align')
+# if not os.path.exists('./model/'):
+#     raise FileNotFoundError("Directory ./model does not exist, cannot setup model/monotonic_align")
+# if not os.path.exists('./model/monotonic_align'):
+#     raise FileNotFoundError("Directory ./model/monotonic_align does not exist, cannot setup model/monotonic_align")
+#
+# if not os.path.exists('./model/monotonic_align/model'):
+#     os.mkdir('./model/monotonic_align/model')
+#
+# if not os.path.exists('./model/monotonic_align/model/monotonic_align'):
+#     os.mkdir('./model/monotonic_align/model/monotonic_align')
 
 # create appropriate dataset
 audio_dir = get_audio_dir()
