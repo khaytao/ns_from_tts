@@ -11,9 +11,9 @@ from model.utils import fix_len_compatibility
 
 # data parameters
 filelist_dir = 'resources/filelists/ljspeech/'
-train_filelist_path = filelist_dir +'train.txt'
-valid_filelist_path = filelist_dir + 'valid.txt'
-test_filelist_path = filelist_dir + 'test.txt'
+train_filelist_path = filelist_dir +'train_fixed.txt'
+valid_filelist_path = filelist_dir + 'valid_fixed.txt'
+test_filelist_path = filelist_dir + 'test_fixed.txt'
 cmudict_path = 'resources/cmu_dictionary'
 add_blank = True
 n_feats = 80
@@ -54,3 +54,4 @@ out_size = fix_len_compatibility(2*22050//256)
 
 snr_db = 10
 debug = False
+base_weight_path = r"checkpts/grad-tts.pt"

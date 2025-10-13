@@ -100,6 +100,9 @@ class GradTTS_NS(GradTTS):
 
         self.freeze_encoder()
 
+    def init_controlnet(self, base_weight_path):
+        self.decoder.estimator.init_weights_from_base(base_weight_path)
+
     def freeze_encoder(self):
         for p in self.encoder.parameters():
             p.requires_grad = False

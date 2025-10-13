@@ -77,6 +77,8 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         for name, p in self.named_parameters():
             if is_base_layer(name):
                 p.requires_grad = False
+                
+        self.is_initialized = False
 
     @torch.no_grad()
     def init_weights_from_base(self, state_dict, prefix_to_ignore=None):
@@ -206,7 +208,7 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
                 zeroed += 1
             if hasattr(m, "bias") and m.bias is not None:
                 nn.init.zeros_(m.bias)
-
+        self.is_initialized = True
         return {
             "loaded_base_params": len(base_subset),
             "copied_to_control": copied_to_control,
@@ -214,10 +216,16 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
             "prefixes_stripped": list(dict.fromkeys(norm_pfx)),  # unique, preserve order
         }
 
+    def load_from_state_dict(self, state_dict):
+        self.load_state_dict(state_dict)
+        self.is_initialized = True
+
     def forward(self, x, mask, mu, t, c, spk=None):
         # if not isinstance(spk, type(None)):
         #     s = self.spk_mlp(spk)
-
+        if not self.is_initialized:
+            raise ValueError(
+                "DiffusionWithControlNet is not initialized. ")
         t = self.time_pos_emb(t, scale=self.pe_scale)
         t = self.mlp(t)
 

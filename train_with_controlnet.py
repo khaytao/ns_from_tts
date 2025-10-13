@@ -84,6 +84,8 @@ if __name__ == "__main__":
     model = GradTTS_NS(nsymbols, 1, None, n_enc_channels, filter_channels, filter_channels_dp,
                     n_heads, n_enc_layers, enc_kernel, enc_dropout, window_size, 
                     n_feats, dec_dim, beta_min, beta_max, pe_scale).cuda()
+    base_state_dict = torch.load(params.base_weight_path)
+    model.init_controlnet(base_state_dict)
     print('Number of encoder + duration predictor parameters: %.2fm' % (model.encoder.nparams/1e6))
     print('Number of decoder parameters: %.2fm' % (model.decoder.nparams/1e6))
     print('Total parameters: %.2fm' % (model.nparams/1e6))
@@ -99,6 +101,8 @@ if __name__ == "__main__":
     #                      global_step=0, dataformats='HWC')
     #     save_plot(mel.squeeze(), f'{log_dir}/original_{i}.png')
 
+    ckpt = model.state_dict()
+    torch.save(ckpt, f=f"{log_dir}/grad_{0}.pt")
     print('Start training...')
     iteration = 0
     for epoch in range(1, n_epochs + 1):
@@ -153,6 +157,9 @@ if __name__ == "__main__":
         if epoch % params.save_every > 0:
             continue
 
+        ckpt = model.state_dict()
+        torch.save(ckpt, f=f"{log_dir}/grad_{epoch}.pt")
+
         model.eval()
         print('Synthesis...')
         with torch.no_grad():
@@ -178,5 +185,4 @@ if __name__ == "__main__":
                 save_plot(attn.squeeze().cpu(), 
                           f'{log_dir}/alignment_{i}.png')
 
-        ckpt = model.state_dict()
-        torch.save(ckpt, f=f"{log_dir}/grad_{epoch}.pt")
+

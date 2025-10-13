@@ -129,4 +129,6 @@ def main():
     print("✅ All done.")
 
 if __name__ == "__main__":
+    import os
+    os.environ["AUDIO_DIR"] = r"G:\My Drive\2024 main folder\datasets\LJSpeech-1.1\wavs"
     main()
