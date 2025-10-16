@@ -169,15 +169,15 @@ if __name__ == "__main__":
                 c = item['c'].to(torch.long).unsqueeze(0).cuda()
                 c_lengths = torch.LongTensor([c.shape[-1]]).cuda()
                 y_enc, y_dec, attn = model(x, x_lengths, c, c_lengths, n_timesteps=50)
-                logger.add_image(f'image_{i}/generated_enc',
-                                 plot_tensor(y_enc.squeeze().cpu()),
-                                 global_step=iteration, dataformats='HWC')
-                logger.add_image(f'image_{i}/generated_dec',
-                                 plot_tensor(y_dec.squeeze().cpu()),
-                                 global_step=iteration, dataformats='HWC')
-                logger.add_image(f'image_{i}/alignment',
-                                 plot_tensor(attn.squeeze().cpu()),
-                                 global_step=iteration, dataformats='HWC')
+                # logger.add_image(f'image_{i}/generated_enc',
+                #                  plot_tensor(y_enc.squeeze().cpu()),
+                #                  global_step=iteration, dataformats='HWC')
+                # logger.add_image(f'image_{i}/generated_dec',
+                #                  plot_tensor(y_dec.squeeze().cpu()),
+                #                  global_step=iteration, dataformats='HWC')
+                # logger.add_image(f'image_{i}/alignment',
+                #                  plot_tensor(attn.squeeze().cpu()),
+                #                  global_step=iteration, dataformats='HWC')
                 save_plot(y_enc.squeeze().cpu(), 
                           f'{log_dir}/generated_enc_{i}.png')
                 save_plot(y_dec.squeeze().cpu(), 
