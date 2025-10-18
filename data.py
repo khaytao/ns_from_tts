@@ -20,6 +20,7 @@ from params import seed as random_seed
 
 import sys
 sys.path.insert(0, 'hifi-gan')
+sys.path.insert(0, '../hifi-gan') #todo this is a quick and dirty hack to make it work from subdirectories
 from meldataset import mel_spectrogram
 
 

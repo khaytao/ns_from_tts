@@ -85,6 +85,7 @@ if __name__ == "__main__":
                     n_heads, n_enc_layers, enc_kernel, enc_dropout, window_size, 
                     n_feats, dec_dim, beta_min, beta_max, pe_scale).cuda()
     base_state_dict = torch.load(params.base_weight_path)
+    model.load_weights(params.base_weight_path)
     model.init_controlnet(base_state_dict)
     print('Number of encoder + duration predictor parameters: %.2fm' % (model.encoder.nparams/1e6))
     print('Number of decoder parameters: %.2fm' % (model.decoder.nparams/1e6))

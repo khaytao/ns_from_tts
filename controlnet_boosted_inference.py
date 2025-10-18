@@ -30,6 +30,13 @@ sys.path.append('./hifi-gan/')
 from env import AttrDict
 from models import Generator as HiFiGAN
 
+import random
+torch.manual_seed(1234)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+np.random.seed(1234)
+random.seed(1234)
+
 def count_lines(path, encoding="utf-8", skip_blank=False):
     """
     Count lines in a text file.

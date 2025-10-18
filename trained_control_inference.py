@@ -30,6 +30,12 @@ sys.path.append('./hifi-gan/')
 from env import AttrDict
 from models import Generator as HiFiGAN
 
+import random
+torch.manual_seed(1234)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+np.random.seed(1234)
+random.seed(1234)
 
 def count_lines(path, encoding="utf-8", skip_blank=False):
     """
@@ -96,7 +102,7 @@ if __name__ == '__main__':
                            params.enc_kernel, params.enc_dropout, params.window_size,
                            params.n_feats, params.dec_dim, params.beta_min, params.beta_max, params.pe_scale)
 
-    generator.load_state_dict(torch.load(args.checkpoint, map_location=lambda loc, storage: loc))
+    generator.load_state_dict(torch.load(args.checkpoint, map_location=lambda loc, storage: loc), strict=True)
     generator.decoder.estimator.is_initialized = True
     _ = generator.cuda().eval()
     print(f'Number of parameters: {generator.nparams}')
