@@ -24,9 +24,9 @@ from utils import intersperse
 from torch.utils.data import DataLoader
 from data import TextMelDataset, TextMelBatchCollate
 
-import sys
 
-sys.path.append('./hifi-gan/')
+import sys
+sys.path.append('../hifi-gan/')
 from env import AttrDict
 from models import Generator as HiFiGAN
 
@@ -64,6 +64,7 @@ def count_lines(path, encoding="utf-8", skip_blank=False):
 HIFIGAN_CONFIG = './checkpts/hifigan-config.json'
 HIFIGAN_CHECKPT = './checkpts/hifigan.pt'
 
+
 n_feats = params.n_feats
 n_fft = params.n_fft
 sample_rate = params.sample_rate
@@ -72,18 +73,16 @@ win_length = params.win_length
 f_min = params.f_min
 f_max = params.f_max
 
-USE_MAS = False
+USE_MAS = True
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-f', '--file', type=str, required=True, help='path to a file with texts to synthesize')
     parser.add_argument('-c', '--checkpoint', type=str, required=True, help='path to a checkpoint of Grad-TTS')
-    parser.add_argument('-t', '--timesteps', type=int, required=False, default=10,
-                        help='number of timesteps of reverse diffusion')
-    parser.add_argument('-s', '--speaker_id', type=int, required=False, default=None,
-                        help='speaker id for multispeaker model')
+    parser.add_argument('-t', '--timesteps', type=int, required=False, default=10, help='number of timesteps of reverse diffusion')
+    parser.add_argument('-s', '--speaker_id', type=int, required=False, default=None, help='speaker id for multispeaker model')
     args = parser.parse_args()
-
+    
     if not isinstance(args.speaker_id, type(None)):
         assert params.n_spks > 1, "Ensure you set right number of speakers in `params.py`."
         spk = torch.LongTensor([args.speaker_id]).cuda()
@@ -92,21 +91,17 @@ if __name__ == '__main__':
 
     num_samples = count_lines(args.file, skip_blank=True)
 
-
-    weight_name = args.checkpoint.split('/')[-1]
-    weight_name = weight_name.split('.')[0]
     print('Initializing Grad-TTS...')
-    generator = GradTTS_NS(len(symbols) + 1, params.n_spks, params.spk_emb_dim,
-                           params.n_enc_channels, params.filter_channels,
-                           params.filter_channels_dp, params.n_heads, params.n_enc_layers,
-                           params.enc_kernel, params.enc_dropout, params.window_size,
-                           params.n_feats, params.dec_dim, params.beta_min, params.beta_max, params.pe_scale)
-
-    generator.load_state_dict(torch.load(args.checkpoint, map_location=lambda loc, storage: loc), strict=True)
-    generator.decoder.estimator.is_initialized = True
+    generator = GradTTS_NS(len(symbols)+1, params.n_spks, params.spk_emb_dim,
+                        params.n_enc_channels, params.filter_channels,
+                        params.filter_channels_dp, params.n_heads, params.n_enc_layers,
+                        params.enc_kernel, params.enc_dropout, params.window_size,
+                        params.n_feats, params.dec_dim, params.beta_min, params.beta_max, params.pe_scale)
+    # generator.load_state_dict(torch.load(args.checkpoint, map_location=lambda loc, storage: loc))
+    generator.load_weights(args.checkpoint)
     _ = generator.cuda().eval()
     print(f'Number of parameters: {generator.nparams}')
-
+    
     print('Initializing HiFi-GAN...')
     with open(HIFIGAN_CONFIG) as f:
         h = AttrDict(json.load(f))
@@ -114,11 +109,11 @@ if __name__ == '__main__':
     vocoder.load_state_dict(torch.load(HIFIGAN_CHECKPT, map_location=lambda loc, storage: loc)['generator'])
     _ = vocoder.cuda().eval()
     vocoder.remove_weight_norm()
-
+    
     # with open(args.file, 'r', encoding='utf-8') as f:
     #     texts = [line.strip() for line in f.readlines()]
 
-    CMU_PATH = './resources/cmu_dictionary'
+    CMU_PATH = '../resources/cmu_dictionary'
     cmu = cmudict.CMUDict(CMU_PATH)
     add_blank = params.add_blank
 
@@ -142,15 +137,14 @@ if __name__ == '__main__':
             x_lengths = torch.LongTensor([x.shape[-1]]).cuda()
             c_lengths = torch.LongTensor([mel.shape[-1]]).cuda()
             t = dt.datetime.now()
-            y_enc, y_dec, attn = generator.forward(x, x_lengths, mel, c_lengths, n_timesteps=args.timesteps,
-                                                   temperature=1.5,
+            y_enc, y_dec, attn = generator.forward(x, x_lengths, mel, c_lengths, n_timesteps=args.timesteps, temperature=1.5,
                                                    stoc=False, spk=spk, length_scale=1, use_mas=USE_MAS)
             t = (dt.datetime.now() - t).total_seconds()
             print(f'Grad-TTS RTF: {t * 22050 / (y_dec.shape[-1] * 256)}')
 
             audio = (vocoder.forward(y_dec).cpu().squeeze().clamp(-1, 1).numpy() * 32768).astype(np.int16)
 
-            write(f'./out/sample_{i}_{weight_name}.wav', 22050, audio)
+            write(f'./out/sample_{i}.wav', 22050, audio)
 
     print('Done. Check out `out` folder for samples.')
 

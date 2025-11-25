@@ -32,3 +32,4 @@ resources/filelists/ljspeech/train_fixed.txt
 resources/filelists/ljspeech/valid_fixed.txt
 resources/filelists/clean_lj
 *_fixed.txt
+analysis

@@ -21,7 +21,7 @@ from text.symbols import symbols
 from utils import intersperse
 
 import sys
-sys.path.append('./hifi-gan/')
+sys.path.append('../hifi-gan/')
 from env import AttrDict
 from models import Generator as HiFiGAN
 
@@ -64,7 +64,7 @@ if __name__ == '__main__':
     
     with open(args.file, 'r', encoding='utf-8') as f:
         texts = [line.strip() for line in f.readlines()]
-    cmu = cmudict.CMUDict('./resources/cmu_dictionary')
+    cmu = cmudict.CMUDict('../resources/cmu_dictionary')
     
     with torch.no_grad():
         for i, text in enumerate(texts):

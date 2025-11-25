@@ -109,7 +109,7 @@ class GradTTS_NS(GradTTS):
         self.encoder.eval()
 
     @torch.no_grad()
-    def forward(self, x, x_lengths, c, c_lengths, n_timesteps, temperature=1.0, stoc=False, spk=None, length_scale=1.0, use_mas=False):
+    def forward(self, x, x_lengths, c, c_lengths, n_timesteps, temperature=1.0, stoc=False, spk=None, length_scale=1.0, use_mas=False, clean=None):
         """
         Generates mel-spectrogram from text. Returns:
             1. encoder outputs
@@ -129,6 +129,8 @@ class GradTTS_NS(GradTTS):
         """
         x, x_lengths, c, c_lengths = self.relocate_input([x, x_lengths, c, c_lengths])
 
+
+
         if self.n_spks > 1:
             # Get speaker embedding
             spk = self.spk_emb(spk)
@@ -141,9 +143,14 @@ class GradTTS_NS(GradTTS):
         pad = T_pad - T_control
 
         c_pad = F.pad(c, (0, pad)) if pad > 0 else c  # [B, n_feats, T_pad]
+
+        if clean is not None and isinstance(clean, torch.Tensor):
+            clean = clean.to(c.device)
+            clean_lengths = c_lengths
+            clean_pad = F.pad(clean, (0, pad)) if pad > 0 else clean  # [B, n_feats, T_pad]
         # c_smooth = F.avg_pool1d(c_pad, kernel_size=5, stride=1, padding=2)  # [B, n_feats, T_pad]
 
-        if not use_mas:  # assume based on durations
+        if not use_mas and clean is None:  # assume based on durations
             # w = torch.exp(logw) * x_mask
             w_ceil = renormalize_durations(logw, x_mask, T_control, length_scale)
             # w_ceil = torch.ceil(w) * length_scale
@@ -158,13 +165,17 @@ class GradTTS_NS(GradTTS):
             attn = generate_path(w_ceil.squeeze(1), attn_mask.squeeze(1)).unsqueeze(1)
 
         else:  # use MAS
-            c_max_length = c_pad.shape[-1]
+
+            if clean is not None and isinstance(clean, torch.Tensor):
+                mas_ref = clean_pad
+            else:
+                mas_ref = c_pad
+            c_max_length = mas_ref.shape[-1]
             c_mask = sequence_mask(c_lengths, c_max_length).unsqueeze(1).to(x_mask)
-            # c_mask = c_mask * get_active_times_mask(c_pad, c_mask)
             const = -0.5 * math.log(2 * math.pi) * self.n_feats
             factor = -0.5 * torch.ones(mu_x.shape, dtype=mu_x.dtype, device=mu_x.device)
-            y_square = torch.matmul(factor.transpose(1, 2), c_pad ** 2)
-            y_mu_double = torch.matmul(2.0 * (factor * mu_x).transpose(1, 2), c_pad)
+            y_square = torch.matmul(factor.transpose(1, 2), mas_ref ** 2)
+            y_mu_double = torch.matmul(2.0 * (factor * mu_x).transpose(1, 2), mas_ref)
             mu_square = torch.sum(factor * (mu_x ** 2), 1).unsqueeze(-1)
             log_prior = y_square - y_mu_double + mu_square + const
             attn_mask = x_mask.unsqueeze(-1) * c_mask.unsqueeze(2)

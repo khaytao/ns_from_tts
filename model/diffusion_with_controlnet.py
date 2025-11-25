@@ -247,6 +247,8 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         hiddens = []
         masks = [mask]
 
+        assert torch.isfinite(x).all()
+        assert torch.isfinite(c).all()
         # x downs
         for resnet1, resnet2, attn, downsample in self.downs:
             mask_down = masks[-1]
@@ -256,6 +258,7 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
             hiddens.append(x)
             x = downsample(x * mask_down)
             masks.append(mask_down[:, :, :, ::2])
+
 
         # c downs  - TODO critical -> understand the mask part, it seems it's not needed to save for c
 
@@ -274,6 +277,9 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         masks = masks[:-1]
         mask_mid = masks[-1]
 
+        assert torch.isfinite(x).all()
+        assert torch.isfinite(c).all()
+
         # c middle
         c = self.control_mid_block1(c, mask_mid, t)
         c = self.control_mid_attn(c)
@@ -286,20 +292,54 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         x = self.mid_block2(x, mask_mid, t)
         x = x + c
 
+        assert torch.isfinite(x).all()
+        assert torch.isfinite(c).all()
+
+        #debug function, todo remove
+        def _chk(tag, t):
+            if not torch.isfinite(t).all():
+                raise RuntimeError(f"NaN/Inf after {tag}: ")
+
         # Ups
-        for (resnet1, resnet2, attn, upsample), z_up in zip(self.ups, self.z_ups):
-            mask_up = masks.pop()
+        # for (resnet1, resnet2, attn, upsample), z_up in zip(self.ups, self.z_ups):
+        #     mask_up = masks.pop()
+        #     skip = hiddens.pop()
+        #     c_skip = hiddens_c.pop()
+        #     x = torch.cat((x, skip + z_up(c_skip)), dim=1)
+        #     x = resnet1(x, mask_up, t)
+        #     x = resnet2(x, mask_up, t)
+        #     x = attn(x)
+        #     x = upsample(x * mask_up)
+        for up_idx, ((resnet1, resnet2, attn, upsample), z_up) in enumerate(zip(self.ups, self.z_ups)):
+            mask_up = masks.pop().to(x.dtype).clamp(0, 1)
             skip = hiddens.pop()
             c_skip = hiddens_c.pop()
+
+            _chk(f"pre-cat[{up_idx}]", x)
             x = torch.cat((x, skip + z_up(c_skip)), dim=1)
+            _chk(f"concat[{up_idx}]", x)
+
             x = resnet1(x, mask_up, t)
+            _chk(f"resnet1[{up_idx}]", x)
+
             x = resnet2(x, mask_up, t)
+            _chk(f"resnet2[{up_idx}]", x)
+
             x = attn(x)
+            _chk(f"attn[{up_idx}]", x)
+
             x = upsample(x * mask_up)
+            _chk(f"upsample[{up_idx}]", x)
+        if not torch.isfinite(x).all():
+            print("x is not finite")
+        assert torch.isfinite(x).all()
+        assert torch.isfinite(c).all()
 
         x = self.final_block(x, mask)
         output = self.final_conv(x * mask)
 
+        assert torch.isfinite(x).all()
+        assert torch.isfinite(c).all()
         return (output * mask).squeeze(1)
 
 
@@ -343,7 +383,10 @@ class DiffusionWithControlNet(Diffusion):
                 dxt_stoc = dxt_stoc * torch.sqrt(noise_t * h)
                 dxt = dxt_det + dxt_stoc
             else:
+
                 dxt = 0.5 * (mu - xt - self.estimator(xt, mask, mu, t, c, spk))
+                if not torch.isfinite(dxt).all():
+                    print("dxt is not finite")
                 dxt = dxt * noise_t * h
             xt = (xt - dxt) * mask
         return xt
