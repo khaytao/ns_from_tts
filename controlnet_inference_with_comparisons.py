@@ -12,10 +12,12 @@ import torch
 import torchaudio as ta
 
 import controlnet_params as params
-from model import GradTTS, GradTTS_NS  # baseline and control
+from model import GradTTS_NS  # both baseline and control utilize same class
 from text import text_to_sequence, cmudict
 from text.symbols import symbols
 from utils import intersperse
+
+from mel_comparison import compare_to_reference
 
 from data import TextMelNoisyMelDataset
 
@@ -37,6 +39,9 @@ random.seed(1234)
 HIFIGAN_CONFIG = './checkpts/hifigan-config.json'
 HIFIGAN_CHECKPT = './checkpts/hifigan.pt'
 
+# Global path to pretrained baseline (non-control) GradTTS_NS weights
+BASE_PRETRAINED_PATH = './checkpts/controlnet_model_base_grad.pt'
+
 n_feats = params.n_feats
 n_fft = params.n_fft
 sample_rate = params.sample_rate
@@ -45,7 +50,7 @@ win_length = params.win_length
 f_min = params.f_min
 f_max = params.f_max
 
-USE_MAS = True  # kept for interface compatibility, not used here
+USE_MAS = True
 
 
 def count_lines(path, encoding="utf-8", skip_blank=False):
@@ -72,7 +77,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Compare clean reference audio with baseline TTS synthesis (no ControlNet).')
     parser.add_argument('-f', '--file', type=str, required=True, help='Path to filelist (wav|text) to analyse')
     parser.add_argument('-c', '--checkpoint', type=str, required=True, help='Path to GradTTS_NS checkpoint (with ControlNet)')
-    parser.add_argument('-gradc', '--grad_checkpoint', type=str, required=True, help='Path to GradTTS checkpoint (baseline, no control)')
+    parser.add_argument('-gradc', '--grad_checkpoint', type=str, default=BASE_PRETRAINED_PATH,
+                        help='Path to pretrained GradTTS_NS checkpoint for baseline (default: %(default)s)')
     parser.add_argument('-n', '--num_samples', type=int, default=10, help='Number of random samples to analyse')
     parser.add_argument('-t', '--timesteps', type=int, default=10, help='Number of diffusion reverse steps')
     parser.add_argument('-s', '--speaker_id', type=int, default=None, help='Speaker id for multi-speaker model')
@@ -102,15 +108,18 @@ if __name__ == '__main__':
     n_select = min(args.num_samples, total_available)
     indices = random.sample(range(total_available), n_select)
 
-    # Initialize baseline Grad-TTS (no control)
-    print('Initializing Grad-TTS (baseline)...')
-    base_generator = GradTTS(len(symbols) + 1, params.n_spks, params.spk_emb_dim,
+    # Initialize baseline GradTTS_NS (no control signal, pretrained)
+    print('Initializing GradTTS_NS baseline...')
+    base_generator = GradTTS_NS(len(symbols) + 1, params.n_spks, params.spk_emb_dim,
                              params.n_enc_channels, params.filter_channels,
                              params.filter_channels_dp, params.n_heads, params.n_enc_layers,
                              params.enc_kernel, params.enc_dropout, params.window_size,
                              params.n_feats, params.dec_dim, params.beta_min, params.beta_max, params.pe_scale)
 
-    base_generator.load_state_dict(torch.load(args.grad_checkpoint, map_location=lambda loc, storage: loc), strict=True)
+    base_state = torch.load(args.grad_checkpoint, map_location=lambda loc, storage: loc)
+    base_generator.load_state_dict(base_state, strict=True)
+    if hasattr(base_generator.decoder, 'estimator'):
+        base_generator.decoder.estimator.is_initialized = True
     _ = base_generator.cuda().eval()
     print(f'Baseline parameters: {base_generator.nparams}')
 
@@ -149,19 +158,22 @@ if __name__ == '__main__':
             # Prepare text tokens
             x = item['x'].to(torch.long).unsqueeze(0).cuda()
             x_lengths = torch.LongTensor([x.shape[-1]]).cuda()
-
-            t0 = dt.datetime.now()
-            y_enc_base, y_dec_base, _ = base_generator.forward(x, x_lengths,
-                                                               n_timesteps=args.timesteps,
-                                                               temperature=1.5, stoc=False,
-                                                               spk=spk, length_scale=1.0)
-            gen_time = (dt.datetime.now() - t0).total_seconds()
-            rtf_base = gen_time * sample_rate / (y_dec_base.shape[-1] * hop_length)
-
             # Control synthesis
             mel_control = item['c'].cuda()[None, :, :]
             mel_clean = item['y'].cuda()
             c_lengths = torch.LongTensor([mel_control.shape[-1]]).cuda()
+
+            t0 = dt.datetime.now()
+            y_enc_base, y_dec_base, _ = base_generator.forward(x, x_lengths,
+                                                                  mel_control, c_lengths,
+                                                                  n_timesteps=args.timesteps,
+                                                                  temperature=1.5, stoc=False,
+                                                                  spk=spk, length_scale=1.0,
+                                                                  use_mas=USE_MAS, clean=mel_clean)
+            gen_time = (dt.datetime.now() - t0).total_seconds()
+            rtf_base = gen_time * sample_rate / (y_dec_base.shape[-1] * hop_length)
+
+
 
             t1 = dt.datetime.now()
             y_enc_ctrl, y_dec_ctrl, _ = control_generator.forward(x, x_lengths,
@@ -175,6 +187,9 @@ if __name__ == '__main__':
 
             print(f'Sample {out_idx}: RTF base={rtf_base:.3f} | RTF control={rtf_ctrl:.3f}')
 
+            comparison_result = compare_to_reference(mel_clean, torch.squeeze(y_dec_ctrl), torch.squeeze(y_dec_base), name1="with control", name2="base")
+            print(wav_path, " comparison: ")
+            print(comparison_result)
             # Vocoder
             audio_base = vocoder.forward(y_dec_base).cpu().squeeze()
             audio_control = vocoder.forward(y_dec_ctrl).cpu().squeeze()
@@ -201,4 +216,5 @@ if __name__ == '__main__':
                 meta_f.write(f'rtf_base: {rtf_base:.4f}\n')
                 meta_f.write(f'rtf_control: {rtf_ctrl:.4f}\n')
 
-    print(f'Done. Check "{Path(args.outdir).resolve()}" for results.')
+    out_path = Path(args.outdir).resolve()
+    print(f'Done. Check "{out_path}" for results.')
