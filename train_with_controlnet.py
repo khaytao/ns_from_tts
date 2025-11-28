@@ -7,6 +7,7 @@
 # MIT License for more details.
 
 import numpy as np
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 import torch
@@ -79,6 +80,9 @@ if __name__ == "__main__":
     test_dataset = TextMelNoisyMelDataset(valid_filelist_path, cmudict_path, add_blank,
                                   n_fft, n_feats, sample_rate, hop_length,
                                   win_length, f_min, f_max, SNR_DB)
+    test_loader = DataLoader(dataset=test_dataset, batch_size=params.test_size,
+                             collate_fn=batch_collate, drop_last=True,
+                             num_workers=4, shuffle=False)
 
     print('Initializing model...')
     model = GradTTS_NS(nsymbols, 1, None, n_enc_channels, filter_channels, filter_channels_dp,
@@ -95,7 +99,7 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(params=model.parameters(), lr=learning_rate)
 
     print('Logging test batch...')
-    test_batch = test_dataset.sample_test_batch(size=params.test_size)
+    # test_batch = test_dataset.sample_test_batch(size=params.test_size)
     # for i, item in enumerate(test_batch):
     #     mel = item['y']
     #     logger.add_image(f'image_{i}/ground_truth', plot_tensor(mel.squeeze()),
@@ -106,11 +110,17 @@ if __name__ == "__main__":
     torch.save(ckpt, f=f"{log_dir}/grad_{0}.pt")
     print('Start training...')
     iteration = 0
+    # containers for plotting
+    train_dur_hist, train_prior_hist, train_diff_hist = [], [], []
+    test_dur_hist, test_prior_hist, test_diff_hist = [], [], []
+
     for epoch in range(1, n_epochs + 1):
         model.train()
         dur_losses = []
         prior_losses = []
         diff_losses = []
+
+
         with tqdm(loader, total=len(train_dataset)//batch_size) as progress_bar:
             for batch_idx, batch in enumerate(progress_bar):
                 model.zero_grad()
@@ -151,7 +161,16 @@ if __name__ == "__main__":
                 iteration += 1
 
 
-        log_msg = 'Epoch %d: diffusion loss = %.3f ' % (epoch, np.mean(diff_losses))
+        avg_train_dur = np.mean(dur_losses)
+        avg_train_prior = np.mean(prior_losses)
+        avg_train_diff = np.mean(diff_losses)
+
+        train_dur_hist.append(avg_train_dur)
+        train_prior_hist.append(avg_train_prior)
+        train_diff_hist.append(avg_train_diff)
+
+        log_msg = ('Epoch %d | train: dur=%.3f prior=%.3f diff=%.3f ' %
+                   (epoch, avg_train_dur, avg_train_prior, avg_train_diff))
         with open(f'{log_dir}/train.log', 'a') as f:
             f.write(log_msg)
 
@@ -162,28 +181,53 @@ if __name__ == "__main__":
         torch.save(ckpt, f=f"{log_dir}/grad_{epoch}.pt")
 
         model.eval()
-        print('Synthesis...')
+        print('Evaluating on test set (compute_loss)...')
+        test_dur_losses, test_prior_losses, test_diff_losses = [], [], []
         with torch.no_grad():
-            for i, item in enumerate(test_batch):
-                x = item['x'].to(torch.long).unsqueeze(0).cuda()
-                x_lengths = torch.LongTensor([x.shape[-1]]).cuda()
-                c = item['c'].to(torch.long).unsqueeze(0).cuda()
-                c_lengths = torch.LongTensor([c.shape[-1]]).cuda()
-                y_enc, y_dec, attn = model(x, x_lengths, c, c_lengths, n_timesteps=50)
-                # logger.add_image(f'image_{i}/generated_enc',
-                #                  plot_tensor(y_enc.squeeze().cpu()),
-                #                  global_step=iteration, dataformats='HWC')
-                # logger.add_image(f'image_{i}/generated_dec',
-                #                  plot_tensor(y_dec.squeeze().cpu()),
-                #                  global_step=iteration, dataformats='HWC')
-                # logger.add_image(f'image_{i}/alignment',
-                #                  plot_tensor(attn.squeeze().cpu()),
-                #                  global_step=iteration, dataformats='HWC')
-                save_plot(y_enc.squeeze().cpu(), 
-                          f'{log_dir}/generated_enc_{i}.png')
-                save_plot(y_dec.squeeze().cpu(), 
-                          f'{log_dir}/generated_dec_{i}.png')
-                save_plot(attn.squeeze().cpu(), 
-                          f'{log_dir}/alignment_{i}.png')
+            with tqdm(test_loader, total=len(test_dataset) // batch_size) as progress_bar:
+                for batch_idx, batch in enumerate(progress_bar):
+                    x, x_lengths = batch['x'].cuda(), batch['x_lengths'].cuda()
+                    y, y_lengths = batch['y'].cuda(), batch['y_lengths'].cuda()
+                    c, c_lengths = batch['c'].cuda(), batch['c_lengths'].cuda()
 
+                dur_l, prior_l, diff_l = model.compute_loss(x, x_lengths,
+                                                             y, y_lengths,
+                                                             c, c_lengths,
+                                                             out_size=None)
 
+                test_dur_losses.append(dur_l.item())
+                test_prior_losses.append(prior_l.item())
+                test_diff_losses.append(diff_l.item())
+
+        avg_test_dur = np.mean(test_dur_losses)
+        avg_test_prior = np.mean(test_prior_losses)
+        avg_test_diff = np.mean(test_diff_losses)
+        test_dur_hist.append(avg_test_dur)
+        test_prior_hist.append(avg_test_prior)
+        test_diff_hist.append(avg_test_diff)
+        print(f'Test set: dur_loss={avg_test_dur:.3f}, prior_loss={avg_test_prior:.3f}, diff_loss={avg_test_diff:.3f}')
+
+        logger.add_scalar('test/duration_loss', avg_test_dur, global_step=epoch)
+        logger.add_scalar('test/prior_loss', avg_test_prior, global_step=epoch)
+        logger.add_scalar('test/diffusion_loss', avg_test_diff, global_step=epoch)
+
+    # -------- Plot after training ---------
+    epochs_range = range(1, len(train_dur_hist) + 1)
+    plt.style.use('default')
+    fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+    loss_names = ['Duration Loss', 'Prior Loss', 'Diffusion Loss']
+    for ax, train_hist, test_hist, name in zip(axes,
+                                              [train_dur_hist, train_prior_hist, train_diff_hist],
+                                              [test_dur_hist, test_prior_hist, test_diff_hist],
+                                              loss_names):
+        ax.plot(epochs_range, train_hist, label='Train')
+        ax.plot(epochs_range, test_hist, label='Test')
+        ax.set_ylabel(name)
+        ax.grid(True, linestyle='--', alpha=0.4)
+        ax.legend()
+    axes[-1].set_xlabel('Epoch')
+    plt.tight_layout()
+    plot_path = f"{log_dir}/train_test_loss.png"
+    plt.savefig(plot_path)
+    plt.close()
+    print(f'Saved loss plot to {plot_path}')

@@ -328,8 +328,17 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
             x = attn(x)
             _chk(f"attn[{up_idx}]", x)
 
+            # DEBUG: check length mismatch before upsample
+            if mask_up.shape[-1] != x.shape[-1]:
+                print(f"[DEBUG] pre-up{up_idx}: x_len={x.shape[-1]}, mask_len={mask_up.shape[-1]}")
+
             x = upsample(x * mask_up)
             _chk(f"upsample[{up_idx}]", x)
+
+            # DEBUG: check length mismatch after upsample
+            if mask_up.shape[-1] != x.shape[-1]:
+                print(f"[DEBUG] post-up{up_idx}: x_len={x.shape[-1]}, mask_len={mask_up.shape[-1]}")
+
         if not torch.isfinite(x).all():
             print("x is not finite")
         assert torch.isfinite(x).all()
