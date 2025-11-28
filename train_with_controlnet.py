@@ -212,22 +212,56 @@ if __name__ == "__main__":
         logger.add_scalar('test/diffusion_loss', avg_test_diff, global_step=epoch)
 
     # -------- Plot after training ---------
-    epochs_range = range(1, len(train_dur_hist) + 1)
+    # epochs_range = range(1, len(train_dur_hist) + 1)
+    # plt.style.use('default')
+    # fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
+    # loss_names = ['Duration Loss', 'Prior Loss', 'Diffusion Loss']
+    # for ax, train_hist, test_hist, name in zip(axes,
+    #                                           [train_dur_hist, train_prior_hist, train_diff_hist],
+    #                                           [test_dur_hist, test_prior_hist, test_diff_hist],
+    #                                           loss_names):
+    #     ax.plot(epochs_range, train_hist, label='Train')
+    #     ax.plot(epochs_range, test_hist, label='Test')
+    #     ax.set_ylabel(name)
+    #     ax.grid(True, linestyle='--', alpha=0.4)
+    #     ax.legend()
+    # axes[-1].set_xlabel('Epoch')
+    # plt.tight_layout()
+    # plot_path = f"{log_dir}/train_test_loss.png"
+    # plt.savefig(plot_path)
+    # plt.close()
+    # print(f'Saved loss plot to {plot_path}')
+
+ # -------- Plot after training ---------
     plt.style.use('default')
-    fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
-    loss_names = ['Duration Loss', 'Prior Loss', 'Diffusion Loss']
-    for ax, train_hist, test_hist, name in zip(axes,
-                                              [train_dur_hist, train_prior_hist, train_diff_hist],
-                                              [test_dur_hist, test_prior_hist, test_diff_hist],
-                                              loss_names):
-        ax.plot(epochs_range, train_hist, label='Train')
-        ax.plot(epochs_range, test_hist, label='Test')
-        ax.set_ylabel(name)
-        ax.grid(True, linestyle='--', alpha=0.4)
-        ax.legend()
-    axes[-1].set_xlabel('Epoch')
+
+    # 1) Train diffusion loss
+    train_epochs = range(1, len(train_diff_hist) + 1)
+    plt.figure(figsize=(8, 4))
+    plt.plot(train_epochs, train_diff_hist, label='Train diffusion loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Diffusion Loss')
+    plt.title('Train Diffusion Loss')
+    plt.grid(True, linestyle='--', alpha=0.4)
+    plt.legend()
+    train_plot_path = f"{log_dir}/train_diffusion_loss.png"
     plt.tight_layout()
-    plot_path = f"{log_dir}/train_test_loss.png"
-    plt.savefig(plot_path)
+    plt.savefig(train_plot_path)
     plt.close()
-    print(f'Saved loss plot to {plot_path}')
+    print(f'Saved train diffusion loss plot to {train_plot_path}')
+
+    # 2) Test diffusion loss (only if we have test data)
+    if len(test_diff_hist) > 0:
+        test_epochs = range(1, len(test_diff_hist) + 1)
+        plt.figure(figsize=(8, 4))
+        plt.plot(test_epochs, test_diff_hist, label='Test diffusion loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Diffusion Loss')
+        plt.title('Test Diffusion Loss')
+        plt.grid(True, linestyle='--', alpha=0.4)
+        plt.legend()
+        test_plot_path = f"{log_dir}/test_diffusion_loss.png"
+        plt.tight_layout()
+        plt.savefig(test_plot_path)
+        plt.close()
+        print(f'Saved test diffusion loss plot to {test_plot_path}')

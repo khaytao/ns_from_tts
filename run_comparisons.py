@@ -37,6 +37,9 @@ f_min = params.f_min
 f_max = params.f_max
 batch_size = params.batch_size
 
+spk = None
+
+
 def load_model(checkpoint_path, device='cuda'):
     """Load GradTTS_NS model from checkpoint"""
     model = GradTTS_NS(len(symbols) + 1, params.n_spks, params.spk_emb_dim,
@@ -50,40 +53,53 @@ def load_model(checkpoint_path, device='cuda'):
         model.decoder.estimator.is_initialized = True
     return model.eval().to(device)
 
-
 def process_batch(batch, base_model, control_model, device, timesteps=10):
-    """Process a single batch through both models"""
-    x = batch['x'].to(device)
-    x_lengths = torch.tensor([x.size(1)], device=device)
-    y = batch['y'].to(device)
-    c = batch['c'].to(device)
-    c_lengths = torch.tensor([c.size(2)], device=device)
+    # Unpack the collated batch just like in train_with_controlnet / inference
+    # Adjust the number/order of items if your collate returns speakers etc.
+    x, x_lengths, y, y_lengths, c, c_lengths = batch
+
+    # Move to device
+    x = x.to(device)
+    x_lengths = x_lengths.to(device)
+    y = y.to(device)
+    y_lengths = y_lengths.to(device)
+    c = c.to(device)
+    c_lengths = c_lengths.to(device)
 
     with torch.no_grad():
-        # Base model
+        # Base model on the *batched* inputs
         _, y_dec_base, _ = base_model(
-            x.unsqueeze(0), x_lengths, c.unsqueeze(0), c_lengths,
+            x, x_lengths, c, c_lengths,
             n_timesteps=timesteps, temperature=1.0, stoc=False,
-            use_mas=True, clean=y.unsqueeze(0)
+            use_mas=True, clean=y
         )
 
-        # Control model
+        # Control model on the same batch
         _, y_dec_control, _ = control_model(
-            x.unsqueeze(0), x_lengths, c.unsqueeze(0), c_lengths,
+            x, x_lengths, c, c_lengths,
             n_timesteps=timesteps, temperature=1.0, stoc=False,
-            use_mas=True, clean=y.unsqueeze(0)
+            use_mas=True, clean=y
         )
 
-        # Compare
-        result = compare_to_reference(
-            y.squeeze(0),
-            y_dec_control.squeeze(0),
-            y_dec_base.squeeze(0),
-            name1="control",
-            name2="base"
-        )
+        # Now compare on the *full batch*
+        # compare_to_reference should either:
+        #   - handle batched tensors, or
+        #   - you loop over batch dimension inside here
+        # Here’s a simple per-sample loop:
+        batch_size = y.shape[0]
+        results = []
+        for i in range(batch_size):
+            r = compare_to_reference(
+                y[i],
+                y_dec_control[i],
+                y_dec_base[i],
+                name1="control",
+                name2="base"
+            )
+            results.append(r)
 
-    return result
+    return results
+
 
 def main():
     parser = argparse.ArgumentParser(description='Compare clean reference audio with baseline TTS synthesis (no ControlNet).')
@@ -106,13 +122,13 @@ def main():
 
     # Load models
     print("Loading models...")
-    base_model = load_model(args.grad_checkpoint, device)
-    control_model = load_model(args.checkpoint, device)
+    base_generator = load_model(args.grad_checkpoint, device)
+    control_generator = load_model(args.checkpoint, device)
 
     # Load dataset
     print("Loading dataset...")
     dataset = TextMelNoisyMelDataset(
-        filelist_path=args.file,
+        filelist_path=params.test_filelist_path,
         cmudict_path=params.cmudict_path,
         add_blank=params.add_blank,
         n_fft=params.n_fft,
@@ -130,12 +146,39 @@ def main():
     # Process all samples
     print("Processing samples...")
     all_results = []
+    # with torch.no_grad():
+    #     # Much simpler and safer: total=len(test_loader)
+    #     with tqdm(test_loader, total=len(test_loader)) as progress_bar:
+    #         for batch_idx, batch in enumerate(progress_bar):
+    #             batch_results = process_batch(batch, base_model, control_model, device, args.timesteps)
+    #             all_results.extend(batch_results)
+
     with torch.no_grad():
         with tqdm(test_loader, total=len(dataset) // batch_size) as progress_bar:
             for batch_idx, batch in enumerate(progress_bar):
-                result = process_batch(batch, base_model, control_model, device, args.timesteps)
-                all_results.append(result)
 
+                x, x_lengths = batch['x'].cuda(), batch['x_lengths'].cuda()
+                y, y_lengths = batch['y'].cuda(), batch['y_lengths'].cuda()
+                c, c_lengths = batch['c'].cuda(), batch['c_lengths'].cuda()
+
+                y_enc_base, y_dec_base, _ = base_generator.forward(x, x_lengths,
+                                                                   c, c_lengths,
+                                                                   n_timesteps=args.timesteps,
+                                                                   temperature=1.5, stoc=False,
+                                                                   spk=spk, length_scale=1.0,
+                                                                   use_mas=True, clean=y)
+
+                y_enc_ctrl, y_dec_ctrl, _ = control_generator.forward(x, x_lengths,
+                                                                   c, c_lengths,
+                                                                   n_timesteps=args.timesteps,
+                                                                   temperature=1.5, stoc=False,
+                                                                   spk=spk, length_scale=1.0,
+                                                                   use_mas=True, clean=y)
+
+                comparison_result = compare_to_reference(y, torch.squeeze(y_dec_ctrl),
+                                                         torch.squeeze(y_dec_base), name1="with control", name2="base")
+
+                all_results.append(comparison_result)
     # Compute statistics after processing
     if not all_results:
         print("No samples processed, not writing stats.")

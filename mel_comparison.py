@@ -42,20 +42,50 @@ def dtw_mel_distance(mel_ref: torch.Tensor, mel_test: torch.Tensor):
 # -------------------------------------------------------
 def compare_to_reference(mel_ref, mel_1, mel_2, name1="test1", name2="test2"):
     """
-    Returns distances and which test is closer.
+    Compute DTW distances between a reference mel and two test mels.
+
+    Supports:
+      - single example:  mel_* shape [n_feats, T]  -> returns dict
+      - batched input:   mel_* shape [B, n_feats, T]  -> returns list[dict]
     """
-    d1 = dtw_mel_distance(mel_ref, mel_1)
-    d2 = dtw_mel_distance(mel_ref, mel_2)
 
-    if d1 < d2:
-        winner = name1
-    elif d2 < d1:
-        winner = name2
+    def _single(m_ref, m_a, m_b):
+        d1 = dtw_mel_distance(m_ref, m_a)
+        d2 = dtw_mel_distance(m_ref, m_b)
+
+        if d1 < d2:
+            winner = name1
+        elif d2 < d1:
+            winner = name2
+        else:
+            winner = "equal"
+
+        return {
+            f"distance_{name1}": d1,
+            f"distance_{name2}": d2,
+            "closer": winner,
+        }
+
+    # Get number of dimensions in a robust way (torch / numpy)
+    ndim = getattr(mel_ref, "ndim", len(mel_ref.shape))
+
+    if ndim == 2:
+        # [n_feats, T] – keep old behavior
+        return _single(mel_ref, mel_1, mel_2)
+
+    elif ndim == 3:
+        # [B, n_feats, T] – batch mode
+        if not (mel_1.shape[0] == mel_ref.shape[0] == mel_2.shape[0]):
+            raise ValueError("Batched compare_to_reference: batch sizes must match.")
+
+        B = mel_ref.shape[0]
+        results = []
+        for i in range(B):
+            results.append(_single(mel_ref[i], mel_1[i], mel_2[i]))
+        return results
+
     else:
-        winner = "equal"
-
-    return {
-        f"distance_{name1}": d1,
-        f"distance_{name2}": d2,
-        "closer": winner
-    }
+        raise ValueError(
+            f"Expected mel tensors of shape [n_feats, T] or [B, n_feats, T], "
+            f"got ndim={ndim} with shape {getattr(mel_ref, 'shape', None)}"
+        )
