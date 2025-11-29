@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from librosa.sequence import dtw
+import torch
 
 # -------------------------------------------------------
 # Normalize mel spectrograms (per frequency bin)
@@ -89,3 +90,48 @@ def compare_to_reference(mel_ref, mel_1, mel_2, name1="test1", name2="test2"):
             f"Expected mel tensors of shape [n_feats, T] or [B, n_feats, T], "
             f"got ndim={ndim} with shape {getattr(mel_ref, 'shape', None)}"
         )
+
+# -------------------------------------------------------
+# Baseline: average + std of DTW distance vs random signals
+# -------------------------------------------------------
+def baseline_comparison(mel_ref: torch.Tensor, n: int, mean: float = 0.0, std: float = 1.0):
+    """
+    Compare n random Gaussian mel spectrograms to a reference and
+    return the mean and std of the DTW distances.
+
+    Parameters
+    ----------
+    mel_ref : torch.Tensor
+        Reference mel, shape [n_mels, T].
+    n : int
+        Number of random Gaussian samples to compare.
+    mean : float, optional
+        Mean of the Gaussian noise (default: 0.0).
+    std : float, optional
+        Std of the Gaussian noise (default: 1.0).
+
+    Returns
+    -------
+    dict
+        {
+            "mean": float,
+            "std": float,
+            "all_distances": list of float
+        }
+    """
+    if mel_ref.ndim != 2:
+        raise ValueError(f"baseline_comparison expects mel_ref with shape [n_mels, T], got {mel_ref.shape}")
+
+    distances = []
+    print("mel-distance to self ",dtw_mel_distance(mel_ref, mel_ref) )
+    for _ in range(n):
+        rand_mel = torch.randn_like(mel_ref) * std + mean
+        d = dtw_mel_distance(mel_ref, rand_mel)
+        distances.append(d)
+
+    distances = np.array(distances)
+    return {
+        "mean": float(distances.mean()),
+        "std": float(distances.std()),
+        "all_distances": distances.tolist()
+    }
