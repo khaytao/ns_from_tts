@@ -3,9 +3,7 @@ import numpy as np
 from librosa.sequence import dtw
 import torch
 
-# -------------------------------------------------------
-# Normalize mel spectrograms (per frequency bin)
-# -------------------------------------------------------
+
 def normalize_mel(mel: torch.Tensor):
     """
     mel: [n_mels, T]
@@ -15,9 +13,7 @@ def normalize_mel(mel: torch.Tensor):
     std = mel.std(dim=1, keepdim=True) + 1e-9
     return (mel - mean) / std
 
-# -------------------------------------------------------
-# DTW distance between two mel spectrograms
-# -------------------------------------------------------
+
 def dtw_mel_distance(mel_ref: torch.Tensor, mel_test: torch.Tensor):
     """
     mel_ref, mel_test: torch tensors [n_mels, T]
@@ -26,21 +22,19 @@ def dtw_mel_distance(mel_ref: torch.Tensor, mel_test: torch.Tensor):
     mel_ref = normalize_mel(mel_ref)
     mel_test = normalize_mel(mel_test)
 
-    # Move to CPU + numpy for librosa
+
     A = mel_ref.detach().cpu().numpy()
     B = mel_test.detach().cpu().numpy()
 
-    # Compute DTW
+
     D, wp = dtw(A, B, metric='euclidean')
 
-    # Normalize by path length
+
     total_cost = D[-1, -1]
     path_len = len(wp) + 1e-9
     return float(total_cost / path_len)
 
-# -------------------------------------------------------
-# Main comparison helper
-# -------------------------------------------------------
+
 def compare_to_reference(mel_ref, mel_1, mel_2, name1="test1", name2="test2"):
     """
     Compute DTW distances between a reference mel and two test mels.
@@ -67,11 +61,11 @@ def compare_to_reference(mel_ref, mel_1, mel_2, name1="test1", name2="test2"):
             "closer": winner,
         }
 
-    # Get number of dimensions in a robust way (torch / numpy)
+
     ndim = getattr(mel_ref, "ndim", len(mel_ref.shape))
 
     if ndim == 2:
-        # [n_feats, T] – keep old behavior
+        # [n_feats, T] – Allow compatabilty with 2d array
         return _single(mel_ref, mel_1, mel_2)
 
     elif ndim == 3:
@@ -91,9 +85,6 @@ def compare_to_reference(mel_ref, mel_1, mel_2, name1="test1", name2="test2"):
             f"got ndim={ndim} with shape {getattr(mel_ref, 'shape', None)}"
         )
 
-# -------------------------------------------------------
-# Baseline: average + std of DTW distance vs random signals
-# -------------------------------------------------------
 def baseline_comparison(mel_ref: torch.Tensor, n: int, mean: float = 0.0, std: float = 1.0):
     """
     Compare n random Gaussian mel spectrograms to a reference and

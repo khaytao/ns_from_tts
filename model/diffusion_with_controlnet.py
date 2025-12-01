@@ -15,30 +15,7 @@ from model.diffusion import *
 import torch.nn as nn
 import torch
 from typing import Iterable, Dict
-
-
-def is_control_layer(name: str) -> bool:
-    # control branches and zero-conv taps
-    return name.startswith("control_")
-
-
-def _is_zero_conv_layer(name: str) -> bool:
-    # control branches and zero-conv taps
-    return name.startswith("z_input") \
-        or name.startswith("z_middle") \
-        or name.startswith("z_downs") \
-        or name.startswith("z_ups")
-
-
-def is_base_layer(name: str) -> bool:
-    return not (is_control_layer(name) or _is_zero_conv_layer(name))
-
-
-def zero_conv(in_channels, out_channels):
-    conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-    nn.init.zeros_(conv.weight)
-    nn.init.zeros_(conv.bias)
-    return conv
+from model.controlnet_helpers import is_base_layer, zero_conv, is_control_layer
 
 
 class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
@@ -97,8 +74,6 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
           4) Zero z_input / z_middle / z_downs[*].
           5) Verify completeness; raise ValueError on missing keys or shape mismatches.
         """
-        # -------- normalize prefixes & strip keys --------
-        # user-provided prefixes
 
         if prefix_to_ignore is None:
             pref_list = []
@@ -133,11 +108,9 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
             if nk not in norm_sd:  # keep first if collision
                 norm_sd[nk] = v
 
-        # -------- identify expected base keys --------
         target_sd = self.state_dict()
 
-        def is_control_key(k):
-            return k.startswith('control_')
+        is_control_key = is_control_layer
 
         def is_z_key(k):
             root = k.split('.', 1)[0]
@@ -146,7 +119,6 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         base_keys_expected = {k for k in target_sd.keys()
                               if not is_control_key(k) and not is_z_key(k)}
 
-        # coverage check
         missing_base = sorted(k for k in base_keys_expected if k not in norm_sd)
         if missing_base:
             preview = ", ".join(missing_base[:10])
@@ -155,11 +127,9 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
                 f"after prefix stripping. First few: {preview}"
             )
 
-        # -------- load base subset --------
         base_subset = {k: norm_sd[k] for k in base_keys_expected}
         self.load_state_dict(base_subset, strict=False)
 
-        # -------- map base -> control and copy --------
         def map_to_control(k):
             if k.startswith("downs."):
                 return "control_" + k  # downs.N.* -> control_downs.N.*
@@ -200,7 +170,6 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
                 f"mismatches after base load. Examples: {examples}"
             )
 
-        # -------- zero all z_* taps explicitly --------
         zeroed = 0
         for m in [self.z_input, self.z_middle, *list(self.ups)]:
             if hasattr(m, "weight") and m.weight is not None:
@@ -234,11 +203,10 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
             c = torch.stack([mu, c], 1)
         else:
             raise NotImplementedError("Controlled Diffusion with multiple speakers not implemented")
-            # s = s.unsqueeze(-1).repeat(1, 1, x.shape[-1])
-            # x = torch.stack([mu, x, s], 1)
+
         mask = mask.unsqueeze(1)
 
-        # for now assume c is the same size as x
+        # assume c is the same size as x
         assert c.shape[-1] == x.shape[-1]
 
         c = self.z_input(c)
@@ -260,18 +228,16 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
             masks.append(mask_down[:, :, :, ::2])
 
 
-        # c downs  - TODO critical -> understand the mask part, it seems it's not needed to save for c
+        # c downs
 
         hiddens_c = []
         mask_down_c = mask
         for resnet1, resnet2, attn, downsample in self.control_downs:
-            # mask_down = masks[-1]
             c = resnet1(c, mask_down_c, t)
             c = resnet2(c, mask_down_c, t)
             c = attn(c)
             hiddens_c.append(c)
             c = downsample(c * mask_down_c)
-            # masks.append(mask_down[:, :, :, ::2])
             mask_down_c = mask_down_c[:, :, :, ::2]
 
         masks = masks[:-1]
@@ -295,41 +261,21 @@ class GradLogPEstimator2dWithControlNet(GradLogPEstimator2d):
         assert torch.isfinite(x).all()
         assert torch.isfinite(c).all()
 
-        #debug function, todo remove
-        def _chk(tag, t):
-            if not torch.isfinite(t).all():
-                raise RuntimeError(f"NaN/Inf after {tag}: ")
 
-        # Ups
-        # for (resnet1, resnet2, attn, upsample), z_up in zip(self.ups, self.z_ups):
-        #     mask_up = masks.pop()
-        #     skip = hiddens.pop()
-        #     c_skip = hiddens_c.pop()
-        #     x = torch.cat((x, skip + z_up(c_skip)), dim=1)
-        #     x = resnet1(x, mask_up, t)
-        #     x = resnet2(x, mask_up, t)
-        #     x = attn(x)
-        #     x = upsample(x * mask_up)
         for up_idx, ((resnet1, resnet2, attn, upsample), z_up) in enumerate(zip(self.ups, self.z_ups)):
             mask_up = masks.pop().to(x.dtype).clamp(0, 1)
             skip = hiddens.pop()
             c_skip = hiddens_c.pop()
 
-            _chk(f"pre-cat[{up_idx}]", x)
             x = torch.cat((x, skip + z_up(c_skip)), dim=1)
-            _chk(f"concat[{up_idx}]", x)
 
             x = resnet1(x, mask_up, t)
-            _chk(f"resnet1[{up_idx}]", x)
 
             x = resnet2(x, mask_up, t)
-            _chk(f"resnet2[{up_idx}]", x)
 
             x = attn(x)
-            _chk(f"attn[{up_idx}]", x)
 
             x = upsample(x * mask_up)
-            _chk(f"upsample[{up_idx}]", x)
 
         if not torch.isfinite(x).all():
             print("x is not finite")

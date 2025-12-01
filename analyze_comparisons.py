@@ -70,3 +70,11 @@ def analyze_results(json_path: str) -> Dict[str, Any]:
         },
         "closer_counts": dict(closer_counts),
     }
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description='Analyze comparisons JSON file.')
+    parser.add_argument('json_path', type=str, help='Path to JSON file containing comparison results')
+    args = parser.parse_args()
+    analyze_results(args.json_path)

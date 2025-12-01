@@ -204,7 +204,7 @@ class TextMelNoisyMelDataset(torch.utils.data.Dataset):
         self.cmudict = cmudict.CMUDict(cmudict_path)
         self.add_blank = add_blank
 
-        # mel / audio params (mirror your existing datasets)
+        # mel / audio params
         self.n_fft = n_fft
         self.n_mels = n_mels
         self.sample_rate = sample_rate
