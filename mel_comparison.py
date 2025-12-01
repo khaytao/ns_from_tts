@@ -1,50 +1,56 @@
-import torch
 import numpy as np
-from librosa.sequence import dtw
 import torch
+from librosa.sequence import dtw
 
 
-def normalize_mel(mel: torch.Tensor):
-    """
-    mel: [n_mels, T]
-    Returns normalized mel of same shape.
-    """
+def normalize_mel(mel: torch.Tensor) -> torch.Tensor:
+    """Normalize mel spectrogram per frequency bin: (x - mean) / std."""
+    # mel: [n_mels, T]
     mean = mel.mean(dim=1, keepdim=True)
     std = mel.std(dim=1, keepdim=True) + 1e-9
     return (mel - mean) / std
 
 
-def dtw_mel_distance(mel_ref: torch.Tensor, mel_test: torch.Tensor):
+def dtw_mel_distance(mel_ref: torch.Tensor, mel_test: torch.Tensor) -> float:
     """
-    mel_ref, mel_test: torch tensors [n_mels, T]
-    Returns scalar distance (lower = more similar)
+    Compute DTW distance between two mel spectrograms.
+
+    Args:
+        mel_ref: [n_mels, T_ref]
+        mel_test: [n_mels, T_test]
+
+    Returns:
+        Scalar distance (lower = more similar).
     """
     mel_ref = normalize_mel(mel_ref)
     mel_test = normalize_mel(mel_test)
 
-
     A = mel_ref.detach().cpu().numpy()
     B = mel_test.detach().cpu().numpy()
 
-
-    D, wp = dtw(A, B, metric='euclidean')
-
-
+    D, wp = dtw(A, B, metric="euclidean")
     total_cost = D[-1, -1]
     path_len = len(wp) + 1e-9
+
     return float(total_cost / path_len)
 
 
-def compare_to_reference(mel_ref, mel_1, mel_2, name1="test1", name2="test2"):
+def compare_to_reference(
+    mel_ref: torch.Tensor,
+    mel_1: torch.Tensor,
+    mel_2: torch.Tensor,
+    name1: str = "test1",
+    name2: str = "test2",
+):
     """
-    Compute DTW distances between a reference mel and two test mels.
+    Compare two mel spectrograms to a reference using DTW.
 
     Supports:
-      - single example:  mel_* shape [n_feats, T]  -> returns dict
-      - batched input:   mel_* shape [B, n_feats, T]  -> returns list[dict]
+        - Single example: [n_feats, T] -> returns dict.
+        - Batch: [B, n_feats, T] -> returns list[dict].
     """
 
-    def _single(m_ref, m_a, m_b):
+    def _single(m_ref: torch.Tensor, m_a: torch.Tensor, m_b: torch.Tensor):
         d1 = dtw_mel_distance(m_ref, m_a)
         d2 = dtw_mel_distance(m_ref, m_b)
 
@@ -61,17 +67,18 @@ def compare_to_reference(mel_ref, mel_1, mel_2, name1="test1", name2="test2"):
             "closer": winner,
         }
 
-
-    ndim = getattr(mel_ref, "ndim", len(mel_ref.shape))
+    ndim = mel_ref.ndim
 
     if ndim == 2:
-        # [n_feats, T] – Allow compatabilty with 2d array
+        # [n_feats, T] – compatibility with 2D tensors
         return _single(mel_ref, mel_1, mel_2)
 
-    elif ndim == 3:
+    if ndim == 3:
         # [B, n_feats, T] – batch mode
         if not (mel_1.shape[0] == mel_ref.shape[0] == mel_2.shape[0]):
-            raise ValueError("Batched compare_to_reference: batch sizes must match.")
+            raise ValueError(
+                "Batched compare_to_reference: batch sizes must match."
+            )
 
         B = mel_ref.shape[0]
         results = []
@@ -79,42 +86,40 @@ def compare_to_reference(mel_ref, mel_1, mel_2, name1="test1", name2="test2"):
             results.append(_single(mel_ref[i], mel_1[i], mel_2[i]))
         return results
 
-    else:
-        raise ValueError(
-            f"Expected mel tensors of shape [n_feats, T] or [B, n_feats, T], "
-            f"got ndim={ndim} with shape {getattr(mel_ref, 'shape', None)}"
-        )
+    raise ValueError(
+        "Expected mel tensors of shape [n_feats, T] or [B, n_feats, T], "
+        f"got ndim={ndim} with shape {getattr(mel_ref, 'shape', None)}"
+    )
 
-def baseline_comparison(mel_ref: torch.Tensor, n: int, mean: float = 0.0, std: float = 1.0):
+
+def baseline_comparison(
+    mel_ref: torch.Tensor,
+    n: int,
+    mean: float = 0.0,
+    std: float = 1.0,
+):
     """
-    Compare n random Gaussian mel spectrograms to a reference and
-    return the mean and std of the DTW distances.
+    Compare random Gaussian mels to a reference using DTW.
 
-    Parameters
-    ----------
-    mel_ref : torch.Tensor
-        Reference mel, shape [n_mels, T].
-    n : int
-        Number of random Gaussian samples to compare.
-    mean : float, optional
-        Mean of the Gaussian noise (default: 0.0).
-    std : float, optional
-        Std of the Gaussian noise (default: 1.0).
+    Args:
+        mel_ref: reference mel, [n_mels, T].
+        n: number of random samples.
+        mean: Gaussian mean.
+        std: Gaussian std.
 
-    Returns
-    -------
-    dict
-        {
-            "mean": float,
-            "std": float,
-            "all_distances": list of float
-        }
+    Returns:
+        dict with keys:
+            "mean": float
+            "std": float
+            "all_distances": list[float]
     """
     if mel_ref.ndim != 2:
-        raise ValueError(f"baseline_comparison expects mel_ref with shape [n_mels, T], got {mel_ref.shape}")
+        raise ValueError(
+            "baseline_comparison expects mel_ref with shape [n_mels, T], "
+            f"got {mel_ref.shape}"
+        )
 
     distances = []
-    print("mel-distance to self ",dtw_mel_distance(mel_ref, mel_ref) )
     for _ in range(n):
         rand_mel = torch.randn_like(mel_ref) * std + mean
         d = dtw_mel_distance(mel_ref, rand_mel)
@@ -124,5 +129,5 @@ def baseline_comparison(mel_ref: torch.Tensor, n: int, mean: float = 0.0, std: f
     return {
         "mean": float(distances.mean()),
         "std": float(distances.std()),
-        "all_distances": distances.tolist()
+        "all_distances": distances.tolist(),
     }
